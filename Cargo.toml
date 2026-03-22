@@ -1,0 +1,68 @@
+[package]
+name = "calibrate"
+version = "0.1.0"
+edition = "2021"
+authors = ["calibrate contributors"]
+description = "GPU training efficiency analyzer — MFU, bottleneck detection, and actionable recommendations"
+license = "MIT"
+repository = "https://github.com/your-org/calibrate"
+keywords = ["gpu", "mfu", "training", "nvml", "profiling"]
+categories = ["command-line-utilities", "development-tools::profiling"]
+readme = "README.md"
+rust-version = "1.75"
+
+[[bin]]
+name = "calibrate"
+path = "src/main.rs"
+
+[dependencies]
+# NVML bindings
+nvml-wrapper = "0.10"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Terminal UI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client for GPU spec DB (blocking; called once at startup)
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+
+# MPSC channel bridging std::thread → tokio
+flume = "0.11"
+
+# Structured diagnostics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Faster RwLock / Mutex
+parking_lot = "0.12"
+
+# High-dynamic-range histogram for step-time percentiles
+hdrhistogram = "7"
+
+# XDG cache directory (~/.cache/calibrate/)
+directories = "5"
+
+# Linux /proc parsing
+libc = "0.2"
+
+[dev-dependencies]
+proptest = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
