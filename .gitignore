@@ -1,23 +1,10 @@
-# Rust build artifacts
 /target/
 Cargo.lock
-
-# IDE
-.vscode/
-.idea/
+**/*.rs.bk
 *.swp
 *.swo
 *~
 .DS_Store
-
-# Build outputs
-*.o
-*.a
-*.so
-*.dylib
-*.dll
-*.exe
-
-# OS files
-.DS_Store
-Thumbs.db
+.vscode/
+.idea/
+*.iml

@@ -1,7 +1,7 @@
 use std::sync::{atomic::AtomicBool, Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::collectors::{MetricsCollector, RawSample};
 use crate::error::CalibrateError;
@@ -9,23 +9,23 @@ use crate::metrics::units::{Celsius, Mhz, Mib, Percent, Watts};
 
 /// Collects GPU metrics via NVML on a dedicated OS thread.
 ///
-/// NVML's C library is synchronous and uses internal locking.  It must NOT
-/// be called from within a tokio task — doing so would block the executor.
-/// `NvmlCollector::run` is designed to be launched via `std::thread::spawn`.
+/// NVML is synchronous and must not be called from a tokio task.
+/// GPU discovery is performed on every tick so multi-GPU jobs that acquire
+/// devices after startup are automatically tracked.
 pub struct NvmlCollector {
-    /// GPU device indices that the target process is using.
-    pub gpu_indices: Vec<u32>,
-    /// Sampling interval.
-    pub interval: Duration,
+    /// PID of the training process being monitored.
+    pid: u32,
+    interval: Duration,
+    shared_cpu: Arc<parking_lot::Mutex<Percent>>,
 }
 
 impl NvmlCollector {
-    /// Create a new collector for the given GPU device indices.
-    pub fn new(gpu_indices: Vec<u32>, interval: Duration) -> Self {
-        Self {
-            gpu_indices,
-            interval,
-        }
+    pub fn new(
+        pid: u32,
+        interval: Duration,
+        shared_cpu: Arc<parking_lot::Mutex<Percent>>,
+    ) -> Self {
+        Self { pid, interval, shared_cpu }
     }
 
     /// Attempt to initialize NVML once; returns an error with a helpful
@@ -39,8 +39,6 @@ impl NvmlCollector {
 
 impl MetricsCollector for NvmlCollector {
     fn run(self, tx: flume::Sender<RawSample>, stop: Arc<AtomicBool>) {
-        // NVML is initialized once per thread — re-using across calls on the
-        // same thread is safe and avoids per-sample init overhead.
         let nvml = match nvml_wrapper::Nvml::init() {
             Ok(n) => n,
             Err(e) => {
@@ -48,6 +46,9 @@ impl MetricsCollector for NvmlCollector {
                 return;
             }
         };
+
+        let mut consecutive_no_gpu: u32 = 0;
+        const NO_GPU_EXIT_THRESHOLD: u32 = 5;
 
         loop {
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
@@ -59,11 +60,37 @@ impl MetricsCollector for NvmlCollector {
                 .unwrap_or_default()
                 .as_millis() as u64;
 
-            for &gpu_index in &self.gpu_indices {
-                match sample_device(&nvml, gpu_index, timestamp_ms) {
+            let gpu_indices = match discover_gpu_indices(&nvml, self.pid) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("GPU discovery failed: {e}");
+                    std::thread::sleep(self.interval);
+                    continue;
+                }
+            };
+
+            if gpu_indices.is_empty() {
+                consecutive_no_gpu += 1;
+                if consecutive_no_gpu >= NO_GPU_EXIT_THRESHOLD {
+                    info!(
+                        pid = self.pid,
+                        "No GPU activity for {} consecutive ticks — process likely exited",
+                        consecutive_no_gpu
+                    );
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+                std::thread::sleep(self.interval);
+                continue;
+            }
+            consecutive_no_gpu = 0;
+
+            let cpu_pct = *self.shared_cpu.lock();
+
+            for gpu_index in gpu_indices {
+                match sample_device(&nvml, gpu_index, timestamp_ms, cpu_pct) {
                     Ok(sample) => {
                         if tx.send(sample).is_err() {
-                            // Receiver dropped — normal shutdown path.
                             return;
                         }
                     }
@@ -74,16 +101,40 @@ impl MetricsCollector for NvmlCollector {
             }
 
             std::thread::sleep(self.interval);
-            debug!("NvmlCollector tick (interval={:?})", self.interval);
+            debug!("NvmlCollector tick (pid={}, interval={:?})", self.pid, self.interval);
         }
     }
 }
 
-/// Query a single device and return a [`RawSample`].
+/// Return the NVML device indices that have `pid` in their compute-processes list.
+fn discover_gpu_indices(nvml: &nvml_wrapper::Nvml, pid: u32) -> Result<Vec<u32>, CalibrateError> {
+    let device_count = nvml
+        .device_count()
+        .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
+
+    let mut indices = Vec::new();
+    for i in 0..device_count {
+        let device = nvml
+            .device_by_index(i)
+            .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
+
+        let processes = device
+            .running_compute_processes()
+            .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
+
+        if processes.iter().any(|p| p.pid == pid) {
+            indices.push(i);
+        }
+    }
+    Ok(indices)
+}
+
+/// Query a single NVML device and return a [`RawSample`].
 fn sample_device(
     nvml: &nvml_wrapper::Nvml,
     gpu_index: u32,
     timestamp_ms: u64,
+    cpu_pct: Percent,
 ) -> Result<RawSample, CalibrateError> {
     use nvml_wrapper::enum_wrappers::device::Clock;
 
@@ -140,7 +191,7 @@ fn sample_device(
         throttle_thermal: throttle_reasons.contains(ThrottleReasons::HW_THERMAL_SLOWDOWN),
         throttle_power: throttle_reasons.contains(ThrottleReasons::SW_POWER_CAP),
         throttle_hw_slowdown: throttle_reasons.contains(ThrottleReasons::HW_SLOWDOWN),
-        // cpu_utilization is patched in by the orchestrator after /proc sampling.
-        cpu_utilization: Percent(0.0),
+        // cpu_utilization is provided by the companion ProcCollector thread.
+        cpu_utilization: cpu_pct,
     })
 }

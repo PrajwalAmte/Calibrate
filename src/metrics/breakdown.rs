@@ -152,4 +152,63 @@ mod tests {
     fn classify_cuda_sync() {
         assert_eq!(classify_sample(5.0, 5.0, 10.0), TimeSlot::CudaSync);
     }
+
+    #[test]
+    fn classify_optimizer_step() {
+        // Mid-range SM with low CPU and normal mem → optimizer.
+        assert_eq!(classify_sample(35.0, 15.0, 30.0), TimeSlot::Optimizer);
+    }
+
+    #[test]
+    fn classify_memory_alloc() {
+        // High mem controller utilization with lower SM → memory alloc.
+        assert_eq!(classify_sample(40.0, 20.0, 90.0), TimeSlot::MemoryAlloc);
+    }
+
+    #[test]
+    fn all_forward_backward_gives_100pct() {
+        let mut w = MetricsWindow::new(150);
+        for _ in 0..20 {
+            w.push(sample(80.0, 20.0, 50.0)); // all ForwardBackward
+        }
+        let bd = TimeBreakdownInferrer::infer(&w);
+        assert!(
+            (bd.forward_backward_pct - 100.0).abs() < 0.1,
+            "expected 100% forward/backward, got {:.1}%",
+            bd.forward_backward_pct
+        );
+        assert_eq!(bd.data_loader_pct, 0.0);
+        assert_eq!(bd.cuda_sync_pct, 0.0);
+    }
+
+    #[test]
+    fn breakdown_percentages_sum_to_100() {
+        let mut w = MetricsWindow::new(150);
+        // Mixed workload touching every slot.
+        for _ in 0..4 { w.push(sample(80.0, 20.0, 50.0)); } // ForwardBackward
+        for _ in 0..3 { w.push(sample(5.0, 70.0, 20.0)); }  // DataLoader
+        for _ in 0..2 { w.push(sample(5.0, 5.0, 10.0)); }   // CudaSync
+        for _ in 0..1 { w.push(sample(40.0, 10.0, 85.0)); } // MemoryAlloc
+        let bd = TimeBreakdownInferrer::infer(&w);
+        let sum = bd.forward_backward_pct
+            + bd.data_loader_pct
+            + bd.cuda_sync_pct
+            + bd.memory_alloc_pct
+            + bd.optimizer_pct;
+        assert!(
+            (sum - 100.0).abs() < 0.01,
+            "percentages should sum to 100, got {sum:.2}"
+        );
+    }
+
+    #[test]
+    fn empty_window_returns_all_zeros() {
+        let w = MetricsWindow::new(150);
+        let bd = TimeBreakdownInferrer::infer(&w);
+        assert_eq!(bd.forward_backward_pct, 0.0);
+        assert_eq!(bd.data_loader_pct, 0.0);
+        assert_eq!(bd.cuda_sync_pct, 0.0);
+        assert_eq!(bd.memory_alloc_pct, 0.0);
+        assert_eq!(bd.optimizer_pct, 0.0);
+    }
 }

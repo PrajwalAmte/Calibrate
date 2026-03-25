@@ -31,6 +31,9 @@ async fn main() -> Result<()> {
         Commands::Watch(args) => {
             commands::watch::run(args).await?;
         }
+        Commands::Probe(args) => {
+            commands::probe::run(args).await?;
+        }
     }
 
     Ok(())

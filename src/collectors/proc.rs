@@ -1,15 +1,17 @@
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant};
+
+use tracing::{error, info, warn};
 
 use crate::error::CalibrateError;
 use crate::metrics::units::Percent;
 
-/// Reads and diffs `/proc/{pid}/stat` to compute the CPU utilization of a
-/// specific process between two successive calls.
-///
-/// This is created once and polled on each sampling interval.  The delta
-/// between consecutive reads is divided by elapsed wall-clock time to yield
-/// a percentage (may exceed 100 on multi-core systems, mirroring `top`).
+/// Reads and diffs `/proc/{pid}/stat` to compute CPU utilization of a
+/// process between successive calls.  May exceed 100% on multi-core systems.
 pub struct ProcCollector {
     pid: u32,
     stat_path: PathBuf,
@@ -20,10 +22,7 @@ pub struct ProcCollector {
 }
 
 impl ProcCollector {
-    /// Create a new collector for the given PID.
-    ///
-    /// Returns [`CalibrateError::ProcessNotFound`] immediately if the process
-    /// does not exist.
+    /// Returns [`CalibrateError::ProcessNotFound`] immediately if the process does not exist.
     pub fn new(pid: u32) -> Result<Self, CalibrateError> {
         let stat_path = PathBuf::from(format!("/proc/{pid}/stat"));
         if !stat_path.exists() {
@@ -43,10 +42,8 @@ impl ProcCollector {
         })
     }
 
-    /// Poll once and return the CPU utilization since the last call.
-    ///
-    /// On the first call, returns `Percent(0.0)` because there is no
-    /// previous sample to diff against.
+    /// Poll once and return CPU utilization since the last call.
+    /// Returns `Percent(0.0)` on the first call (no previous sample to diff).
     pub fn sample(&mut self) -> Result<Percent, CalibrateError> {
         let raw =
             std::fs::read_to_string(&self.stat_path).map_err(|e| CalibrateError::ProcRead {
@@ -78,23 +75,51 @@ impl ProcCollector {
     pub fn is_alive(&self) -> bool {
         self.stat_path.exists()
     }
+
+    /// Blocking loop — runs until `stop` is set or the process exits.
+    /// Designed to be launched with `std::thread::spawn`.
+    pub fn run_background(
+        pid: u32,
+        shared: Arc<parking_lot::Mutex<Percent>>,
+        stop: Arc<AtomicBool>,
+        interval: Duration,
+    ) {
+        let mut collector = match ProcCollector::new(pid) {
+            Ok(c) => c,
+            Err(e) => {
+                error!("ProcCollector init failed for PID {pid}: {e}");
+                return;
+            }
+        };
+
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            if !collector.is_alive() {
+                info!("Process {pid} no longer in /proc — ProcCollector stopping");
+                stop.store(true, Ordering::Relaxed);
+                break;
+            }
+            match collector.sample() {
+                Ok(pct) => *shared.lock() = pct,
+                Err(e) => warn!("ProcCollector sample error for PID {pid}: {e}"),
+            }
+            std::thread::sleep(interval);
+        }
+    }
 }
 
-/// Parse fields 14 + 15 (utime + stime) from `/proc/{pid}/stat`.
-///
-/// The format has the process name in parentheses at position 2, which may
-/// contain spaces — we find matching parens and skip past them before
-/// parsing the numeric fields.
+/// Parse fields 14+15 (utime+stime) from `/proc/{pid}/stat`.
+/// The process name field may contain spaces, so we rfind the closing paren.
 fn parse_cpu_ticks(raw: &str, pid: u32) -> Result<u64, CalibrateError> {
-    // Find the closing paren of the comm field, then split the remainder.
     let after_comm = raw
         .rfind(')')
         .map(|i| &raw[i + 1..])
         .ok_or(CalibrateError::ProcFormat { pid })?;
 
     let fields: Vec<&str> = after_comm.split_whitespace().collect();
-    // After ')' the fields are: state(0), ppid(1), ... utime(11), stime(12)
-    // (0-indexed in the remainder, so fields[11] = utime, fields[12] = stime).
+    // After ')': state(0), ppid(1)... utime(11), stime(12) (0-indexed).
     let utime: u64 = fields
         .get(11)
         .and_then(|s| s.parse().ok())

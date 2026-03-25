@@ -12,6 +12,9 @@ pub struct ProcessInfo {
     pub primary_gpu_name: String,
     /// Whether the tool itself is running inside a container.
     pub container_context: ContainerContext,
+    /// Whether NVML was successfully initialised.  False on non-NVIDIA systems
+    /// or when the nvidia driver is not loaded.  GPU metrics will be absent.
+    pub nvml_available: bool,
 }
 
 /// Result of container-environment detection.
@@ -29,27 +32,33 @@ pub enum ContainerContext {
 
 /// Validate that `pid` exists, is a GPU process, and return structured info.
 ///
-/// This is the entry point used by `WatchCommand` before the sampling loop
-/// starts.  It fails fast and clearly rather than silently producing empty
-/// metrics.
+/// Fails fast with actionable errors rather than silently producing empty metrics.
 pub fn attach(pid: u32) -> Result<ProcessInfo, CalibrateError> {
-    // 1. Verify /proc entry exists.
     let proc_path = format!("/proc/{pid}");
     if !Path::new(&proc_path).exists() {
+        let ctx = crate::process::container::detect();
+        if ctx != ContainerContext::Host {
+            return Err(CalibrateError::ContainerPidIsolation { pid });
+        }
         return Err(CalibrateError::ProcessNotFound { pid });
     }
 
-    // 2. Check read permission on /proc/{pid}/stat.
     let stat_path = format!("/proc/{pid}/stat");
     std::fs::metadata(&stat_path).map_err(|_| CalibrateError::PermissionDenied { pid })?;
 
-    // 3. Find GPU indices for this PID via NVML.
-    let (gpu_indices, primary_gpu_name) = find_gpu_indices(pid)?;
-    if gpu_indices.is_empty() {
+    // NVML init failure is non-fatal: the tool degrades to CPU-only mode.
+    let (gpu_indices, primary_gpu_name, nvml_available) = match find_gpu_indices(pid) {
+        Ok((indices, name)) => (indices, name, true),
+        Err(CalibrateError::NvmlInit(_) | CalibrateError::NvmlUnavailable) => {
+            (vec![], "Unknown (non-NVIDIA GPU or missing driver)".to_string(), false)
+        }
+        Err(e) => return Err(e),
+    };
+
+    if nvml_available && gpu_indices.is_empty() {
         return Err(CalibrateError::NoGpuProcess { pid });
     }
 
-    // 4. Detect container environment.
     let container_context = crate::process::container::detect();
 
     Ok(ProcessInfo {
@@ -57,6 +66,7 @@ pub fn attach(pid: u32) -> Result<ProcessInfo, CalibrateError> {
         gpu_indices,
         primary_gpu_name,
         container_context,
+        nvml_available,
     })
 }
 
@@ -93,4 +103,90 @@ fn find_gpu_indices(pid: u32) -> Result<(Vec<u32>, String), CalibrateError> {
     }
 
     Ok((indices, primary_name))
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper: a PID that can never exist on Linux (max is typically 4_194_304).
+    const NONEXISTENT_PID: u32 = 4_000_001;
+
+    #[test]
+    fn nonexistent_pid_returns_process_not_found() {
+        // We are running on the host (CI or developer machine), so
+        // the container detection will return Host, giving ProcessNotFound.
+        // If this test runs inside a container the error will be
+        // ContainerPidIsolation instead; both are acceptable.
+        let result = attach(NONEXISTENT_PID);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            CalibrateError::ProcessNotFound { pid } => {
+                assert_eq!(pid, NONEXISTENT_PID);
+            }
+            CalibrateError::ContainerPidIsolation { .. } => {
+                // Also acceptable: test is running inside a container.
+            }
+            other => panic!("unexpected error for nonexistent PID: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn process_not_found_error_message_is_actionable() {
+        let err = CalibrateError::ProcessNotFound { pid: 99999 };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("99999"),
+            "error message should contain the PID: {msg}"
+        );
+        assert!(
+            msg.contains("running"),
+            "error message should mention whether process is running: {msg}"
+        );
+    }
+
+    #[test]
+    fn container_isolation_error_includes_docker_exec_hint() {
+        let err = CalibrateError::ContainerPidIsolation { pid: 12345 };
+        let msg = err.to_string();
+        assert!(msg.contains("docker"), "should mention docker: {msg}");
+        assert!(msg.contains("kubectl"), "should mention kubectl: {msg}");
+        assert!(msg.contains("12345"), "should include the PID: {msg}");
+    }
+
+    #[test]
+    fn permission_denied_error_mentions_sudo() {
+        let err = CalibrateError::PermissionDenied { pid: 7 };
+        let msg = err.to_string();
+        assert!(msg.contains("sudo") || msg.contains("permission") || msg.contains("insufficient"),
+            "error should mention privilege escalation: {msg}");
+    }
+
+    #[test]
+    fn nvml_init_error_mentions_driver() {
+        let err = CalibrateError::NvmlInit("library not found".to_string());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("nvidia") || msg.contains("driver") || msg.contains("nvidia-smi"),
+            "NVML init error should mention the driver: {msg}"
+        );
+    }
+
+    #[test]
+    fn nvml_unavailable_error_is_descriptive() {
+        let err = CalibrateError::NvmlUnavailable;
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NVML") || msg.contains("non-NVIDIA"),
+            "error should mention NVML or non-NVIDIA: {msg}"
+        );
+    }
+
+    #[test]
+    fn container_context_detect_returns_a_value() {
+        // Only verifies the function runs without panicking.
+        let _ctx = crate::process::container::detect();
+    }
 }

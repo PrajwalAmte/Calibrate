@@ -2,14 +2,20 @@
 name = "calibrate"
 version = "0.1.0"
 edition = "2021"
-authors = ["calibrate contributors"]
-description = "GPU training efficiency analyzer — MFU, bottleneck detection, and actionable recommendations"
+authors = ["Prajwal Amte <prajwal@example.com>"]
+description = "GPU training efficiency analyzer — real-time MFU, bottleneck detection, and actionable recommendations for NVIDIA GPU workloads"
 license = "MIT"
-repository = "https://github.com/your-org/calibrate"
-keywords = ["gpu", "mfu", "training", "nvml", "profiling"]
+repository = "https://github.com/PrajwalAmte/Calibrate"
+homepage = "https://github.com/PrajwalAmte/Calibrate"
+documentation = "https://github.com/PrajwalAmte/Calibrate#readme"
+keywords = ["gpu", "mfu", "deep-learning", "nvml", "profiling"]
 categories = ["command-line-utilities", "development-tools::profiling"]
 readme = "README.md"
 rust-version = "1.75"
+exclude = [
+    ".github/",
+    "*.md.bak",
+]
 
 [[bin]]
 name = "calibrate"

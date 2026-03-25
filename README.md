@@ -1,4 +1,4 @@
-# calibrate
+# calibrate-placeholder-to-be-replaced
 
 GPU training efficiency analyzer. Attach to a running training job and immediately see your Model FLOP Utilization (MFU), where compute time is being lost, and the single change that would fix it.
 

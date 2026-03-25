@@ -55,6 +55,11 @@ impl MetricsWindow {
         }
     }
 
+    /// Duration in seconds, as an `f64`.  Convenience wrapper over [`duration`].
+    pub fn duration_secs(&self) -> f64 {
+        self.duration().as_secs_f64()
+    }
+
     /// Returns `true` when there are enough samples for reliable statistics.
     pub fn is_reliable(&self) -> bool {
         self.samples.len() >= MIN_RELIABLE_SAMPLES
@@ -108,5 +113,37 @@ mod tests {
         w.push(make_sample(1_000));
         w.push(make_sample(3_000));
         assert_eq!(w.duration().as_millis(), 2000);
+    }
+
+    #[test]
+    fn duration_secs_matches_duration() {
+        let mut w = MetricsWindow::new(150);
+        w.push(make_sample(0));
+        w.push(make_sample(5_000));
+        assert!((w.duration_secs() - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn duration_secs_empty_is_zero() {
+        let w = MetricsWindow::new(10);
+        assert_eq!(w.duration_secs(), 0.0);
+    }
+
+    #[test]
+    fn is_reliable_at_threshold() {
+        let mut w = MetricsWindow::new(150);
+        for i in 0..14 {
+            w.push(make_sample(i as u64 * 2000));
+        }
+        assert!(!w.is_reliable(), "14 samples should not be reliable");
+        w.push(make_sample(14 * 2000));
+        assert!(w.is_reliable(), "15 samples should be reliable");
+    }
+
+    #[test]
+    fn single_sample_not_reliable() {
+        let mut w = MetricsWindow::new(150);
+        w.push(make_sample(0));
+        assert!(!w.is_reliable());
     }
 }

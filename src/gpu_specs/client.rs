@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -35,10 +35,7 @@ impl HttpSpecsClient {
 
 impl SpecsRepository for HttpSpecsClient {
     fn get_by_name(&self, name: &str) -> Option<GpuSpec> {
-        let lower = name.to_lowercase();
-        self.specs.iter().find(|s| {
-            lower.contains(&s.name.to_lowercase()) || s.name.to_lowercase().contains(&lower)
-        }).cloned()
+        crate::gpu_specs::find_best_match(&self.specs, name).cloned()
     }
 }
 

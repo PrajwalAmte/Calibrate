@@ -45,9 +45,14 @@ pub enum CalibrateError {
     SpecNotFound { name: String },
 
     // ── Container / environment ───────────────────────────────────────────
-    #[error("running inside a container without host PID namespace access\n\
-             Re-run with: docker run --pid=host ...")]
-    ContainerPidIsolation,
+    #[error("process {pid} not found inside this container PID namespace.\n\
+             \n\
+             If the training process is on the HOST, re-run calibrate there:\n\
+             \n\
+             • Docker : docker exec -it <container> calibrate watch --pid {pid}\n\
+             • Kubernetes: kubectl exec -it <pod> -- calibrate watch --pid {pid}\n\
+             • Host   : sudo calibrate watch --pid {pid}")]
+    ContainerPidIsolation { pid: u32 },
 
     // ── Sampling ──────────────────────────────────────────────────────────
     #[error("training process {pid} exited before enough samples were collected")]

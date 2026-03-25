@@ -22,6 +22,28 @@ pub struct Cli {
 pub enum Commands {
     /// Attach to a training process and analyze GPU efficiency in real time.
     Watch(WatchArgs),
+    /// Verify the collector pipeline: print raw RawSamples as JSON to stdout.
+    ///
+    /// Use this to confirm that NVML + /proc collectors are working and that
+    /// all fields (including cpu_utilization) arrive populated before starting
+    /// a full monitoring session.
+    Probe(ProbeArgs),
+}
+
+/// Arguments accepted by `calibrate probe`.
+#[derive(Debug, clap::Args)]
+pub struct ProbeArgs {
+    /// Process ID of the running GPU job to probe.
+    #[arg(short, long, value_name = "PID")]
+    pub pid: u32,
+
+    /// Number of RawSamples to collect before exiting.
+    #[arg(short = 'n', long, value_name = "COUNT", default_value = "5")]
+    pub count: u32,
+
+    /// Sampling interval in seconds.
+    #[arg(short, long, value_name = "SECS", default_value = "2")]
+    pub interval: f64,
 }
 
 /// Arguments accepted by `calibrate watch`.

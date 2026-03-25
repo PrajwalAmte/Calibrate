@@ -82,3 +82,97 @@ impl RecommendationEngine {
 fn estimate_dl_gain(data_loader_pct: f32) -> f32 {
     (data_loader_pct * 0.6).clamp(5.0, 30.0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(bottleneck: Bottleneck) -> Recommendation {
+        RecommendationEngine::recommend(&bottleneck, 20.0)
+    }
+
+    #[test]
+    fn every_bottleneck_variant_produces_non_empty_recommendation() {
+        let variants = [
+            Bottleneck::DataLoader,
+            Bottleneck::CudaSync,
+            Bottleneck::MemoryFragmentation,
+            Bottleneck::ThermalThrottle,
+            Bottleneck::ClockUnderspeed,
+            Bottleneck::BelowTargetMfu,
+            Bottleneck::None,
+        ];
+        for b in &variants {
+            let r = RecommendationEngine::recommend(b, 20.0);
+            assert!(!r.title.is_empty(), "title empty for {b:?}");
+            assert!(!r.action.is_empty(), "action empty for {b:?}");
+        }
+    }
+
+    #[test]
+    fn none_bottleneck_has_zero_expected_gain() {
+        let r = rec(Bottleneck::None);
+        assert_eq!(r.expected_mfu_gain_ppt, 0.0);
+    }
+
+    #[test]
+    fn data_loader_gain_scales_with_percentage() {
+        let low = RecommendationEngine::recommend(&Bottleneck::DataLoader, 10.0);
+        let high = RecommendationEngine::recommend(&Bottleneck::DataLoader, 40.0);
+        assert!(
+            high.expected_mfu_gain_ppt >= low.expected_mfu_gain_ppt,
+            "higher DL% should produce >= gain: low={}, high={}",
+            low.expected_mfu_gain_ppt,
+            high.expected_mfu_gain_ppt
+        );
+    }
+
+    #[test]
+    fn data_loader_gain_clamped_at_30ppt() {
+        // 100% data loader time → gain should cap at 30 ppt.
+        let r = RecommendationEngine::recommend(&Bottleneck::DataLoader, 100.0);
+        assert!(
+            r.expected_mfu_gain_ppt <= 30.0,
+            "gain should be capped at 30 ppt, got {}",
+            r.expected_mfu_gain_ppt
+        );
+    }
+
+    #[test]
+    fn data_loader_gain_has_floor_of_5ppt() {
+        // 1% data loader time → gain should be at least 5 ppt.
+        let r = RecommendationEngine::recommend(&Bottleneck::DataLoader, 1.0);
+        assert!(
+            r.expected_mfu_gain_ppt >= 5.0,
+            "gain should have a floor of 5 ppt, got {}",
+            r.expected_mfu_gain_ppt
+        );
+    }
+
+    #[test]
+    fn thermal_recommendation_mentions_cooling() {
+        let r = rec(Bottleneck::ThermalThrottle);
+        assert!(
+            r.action.to_lowercase().contains("cool"),
+            "thermal action should mention cooling: {}",
+            r.action
+        );
+    }
+
+    #[test]
+    fn cuda_sync_recommendation_mentions_item_calls() {
+        let r = rec(Bottleneck::CudaSync);
+        assert!(
+            r.action.contains(".item()"),
+            "sync action should mention .item(): {}",
+            r.action
+        );
+    }
+
+    #[test]
+    fn below_target_mfu_recommendation_has_positive_gain() {
+        let r = rec(Bottleneck::BelowTargetMfu);
+        assert!(r.expected_mfu_gain_ppt > 0.0);
+    }
+}
+

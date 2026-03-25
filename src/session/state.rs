@@ -1,7 +1,4 @@
-use std::sync::Arc;
 use std::time::Duration;
-
-use parking_lot::RwLock;
 
 use crate::analysis::bottleneck::Bottleneck;
 use crate::analysis::recommendations::Recommendation;
@@ -9,65 +6,75 @@ use crate::metrics::breakdown::TimeBreakdown;
 use crate::metrics::mfu::MfuEstimate;
 use crate::metrics::units::{Celsius, Mib, Percent, Watts};
 
-/// A complete point-in-time view of the monitoring session.
-///
-/// Cheaply cloneable via `Arc`; serializable to JSON for the JSON output mode.
-/// Broadcast on a `tokio::sync::watch` channel each sampling interval.
+// ── Snapshot ─────────────────────────────────────────────────────────────────
+
+/// MFU distribution across the session window.
+/// Present once ≥15 samples have been collected.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MfuPercentiles {
+    pub p50: f32,
+    pub p75: f32,
+    pub p95: f32,
+}
+
+/// Point-in-time view of the monitoring session, broadcast on a watch channel
+/// each sampling interval.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionSnapshot {
-    /// Wall-clock elapsed time since the session started.
     pub elapsed: Duration,
-
-    /// Name of the primary GPU being monitored.
     pub gpu_name: String,
-
-    /// MFU estimate for the current window.
     pub mfu: MfuEstimate,
-
-    /// Time breakdown across the five training-loop phases.
+    /// Present once ≥15 samples are collected.
+    pub mfu_percentiles: Option<MfuPercentiles>,
+    pub peak_mfu_pct: f32,
     pub breakdown: TimeBreakdown,
-
-    /// Primary identified bottleneck.
     pub bottleneck: Bottleneck,
-
-    /// Actionable recommendation for the current bottleneck.
     pub recommendation: Recommendation,
 
-    // ── Thermal / Power ───────────────────────────────────────────────────
     pub temperature: Celsius,
     pub power_draw: Watts,
     pub power_limit: Watts,
     pub throttle_thermal: bool,
 
-    // ── Memory ───────────────────────────────────────────────────────────
     pub vram_used_mib: Mib,
     pub vram_total_mib: Mib,
     pub vram_utilization: Percent,
+    pub peak_vram_mib: Mib,
 
-    /// Cost impact, populated only when `--cost-per-hour` was supplied.
+    /// Populated only when `--cost-per-hour` was supplied.
     pub cost_impact: Option<CostImpact>,
-
-    /// Per-GPU data for multi-GPU training.
     pub per_gpu: Vec<GpuSnapshot>,
-
-    /// Approximate number of training steps observed.
     pub steps_observed: u64,
+
+    /// True when any two GPUs' SM utilisation differs by >20 ppt.
+    pub mfu_divergent: bool,
+    /// Max SM utilisation spread across GPUs (ppt). 0.0 for single-GPU runs.
+    pub gpu_mfu_divergence_ppt: f32,
+    /// False on non-NVIDIA hardware or when the nvidia driver is absent.
+    pub nvml_available: bool,
+
+    /// True when VRAM has been monotonically increasing for 8+ consecutive
+    /// samples — a potential memory leak in the training loop.
+    pub vram_growing: bool,
+    /// Mean inter-sample interval in ms. 0.0 until enough samples exist.
+    pub step_time_ms_mean: f32,
+    /// True when step-time coefficient of variation exceeds 0.3 (erratic).
+    pub step_time_erratic: bool,
 }
+
+// ── Supporting types ──────────────────────────────────────────────────────────
 
 /// Cost breakdown at the current MFU versus the 45% target.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CostImpact {
-    /// Current cost per hour (user-supplied).
     pub cost_per_hour: f64,
-    /// Estimated cost per epoch at current MFU (requires step-count heuristic).
     pub current_cost_usd: f64,
-    /// What the same epoch would cost at 45% MFU.
     pub target_cost_usd: f64,
-    /// Waste per hour (current - target).
+    /// Waste per hour (current − target cost rate).
     pub waste_per_hour: f64,
 }
 
-/// Snapshot for a single GPU device (for multi-GPU display).
+/// Snapshot for a single GPU device (multi-GPU display).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GpuSnapshot {
     pub gpu_index: u32,
@@ -76,12 +83,26 @@ pub struct GpuSnapshot {
     pub temperature: Celsius,
 }
 
-/// Shared, mutably-updatable session state.
-///
-/// Wrapped in `Arc<RwLock<>>` so the sampler loop can write and the renderer
-/// can read without blocking.
-pub type SharedState = Arc<RwLock<Option<SessionSnapshot>>>;
+// ── Watch channel ─────────────────────────────────────────────────────────────
 
-pub fn new_shared_state() -> SharedState {
-    Arc::new(RwLock::new(None))
+/// Sender half of the snapshot broadcast channel.
+///
+/// Owned by `MonitoringSession` — dropped when the session loop exits, which
+/// causes `SnapshotReceiver::changed()` to return `Err` and naturally
+/// terminates any render loop.
+pub type SnapshotSender = tokio::sync::watch::Sender<Option<SessionSnapshot>>;
+
+/// Receiver half of the snapshot broadcast channel.
+///
+/// Cloneable — additional renderers can subscribe without extra coordination.
+/// `changed().await` resolves immediately whenever a new snapshot is published.
+pub type SnapshotReceiver = tokio::sync::watch::Receiver<Option<SessionSnapshot>>;
+
+/// Create a new snapshot broadcast channel.
+///
+/// The initial value is `None` — renderers wait for the first sample before
+/// drawing.
+pub fn new_snapshot_channel() -> (SnapshotSender, SnapshotReceiver) {
+    tokio::sync::watch::channel(None)
 }
+

@@ -166,4 +166,86 @@ mod tests {
         let est = calc.compute(&window);
         assert_eq!(est.confidence, Confidence::Low);
     }
+
+    #[test]
+    fn high_confidence_at_exactly_15_samples() {
+        let mut window = MetricsWindow::new(150);
+        for _ in 0..15 {
+            window.push(sample_with(60.0, 2000, 2000));
+        }
+        let s = spec();
+        let calc = MfuCalculator::new(&s);
+        let est = calc.compute(&window);
+        assert_eq!(est.confidence, Confidence::High);
+    }
+
+    #[test]
+    fn empty_window_returns_zero_mfu() {
+        let window = MetricsWindow::new(150);
+        let s = spec();
+        let calc = MfuCalculator::new(&s);
+        let est = calc.compute(&window);
+        assert_eq!(est.mfu_pct.0, 0.0);
+        assert_eq!(est.actual_tflops.0, 0.0);
+        assert_eq!(est.confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn mfu_averages_mixed_samples() {
+        // 10 samples at 100% SM and 10 at 0% SM should average to 50%.
+        let mut window = MetricsWindow::new(150);
+        for _ in 0..10 {
+            window.push(sample_with(100.0, 2000, 2000));
+        }
+        for _ in 0..10 {
+            window.push(sample_with(0.0, 2000, 2000));
+        }
+        let s = spec();
+        let calc = MfuCalculator::new(&s);
+        let est = calc.compute(&window);
+        assert!(
+            (est.mfu_pct.0 - 50.0).abs() < 1.0,
+            "expected ~50% MFU, got {:.1}%",
+            est.mfu_pct.0
+        );
+    }
+
+    #[test]
+    fn actual_tflops_consistent_with_mfu_pct() {
+        let mut window = MetricsWindow::new(150);
+        for _ in 0..20 {
+            window.push(sample_with(80.0, 2000, 2000));
+        }
+        let s = spec();
+        let calc = MfuCalculator::new(&s);
+        let est = calc.compute(&window);
+        let expected_tflops = (est.mfu_pct.0 as f64 / 100.0) * s.bf16_tflops;
+        assert!(
+            (est.actual_tflops.0 - expected_tflops).abs() < 0.01,
+            "actual_tflops={:.2}, expected={:.2}",
+            est.actual_tflops.0,
+            expected_tflops
+        );
+    }
+
+    #[test]
+    fn clock_throttle_reduces_apparent_mfu() {
+        // Running at 50% clock should halve MFU vs full clock at same SM%.
+        let mut window_full = MetricsWindow::new(150);
+        let mut window_half = MetricsWindow::new(150);
+        for _ in 0..20 {
+            window_full.push(sample_with(80.0, 2000, 2000));
+            window_half.push(sample_with(80.0, 1000, 2000));
+        }
+        let s = spec();
+        let calc = MfuCalculator::new(&s);
+        let full = calc.compute(&window_full);
+        let half = calc.compute(&window_half);
+        assert!(
+            (full.mfu_pct.0 - half.mfu_pct.0 * 2.0).abs() < 1.0,
+            "full={:.1}%, half={:.1}% — expected half to be ~50% of full",
+            full.mfu_pct.0,
+            half.mfu_pct.0
+        );
+    }
 }
