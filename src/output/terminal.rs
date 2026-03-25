@@ -32,7 +32,10 @@ impl TerminalRenderer {
         execute!(stdout, EnterAlternateScreen)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal, cleaned_up: false })
+        Ok(Self {
+            terminal,
+            cleaned_up: false,
+        })
     }
 
     fn draw(&mut self, snapshot: &SessionSnapshot) {
@@ -76,7 +79,11 @@ fn render_frame(f: &mut Frame, snap: &SessionSnapshot) {
             || snap.vram_growing
             || snap.elapsed.as_secs() < 30,
     );
-    let multi_gpu_rows = if snap.per_gpu.len() > 1 { snap.per_gpu.len() as u16 + 2 } else { 0 };
+    let multi_gpu_rows = if snap.per_gpu.len() > 1 {
+        snap.per_gpu.len() as u16 + 2
+    } else {
+        0
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -115,14 +122,22 @@ fn render_header(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
         .map(|c| format!("  •  ${:.2}/hr", c.cost_per_hour))
         .unwrap_or_default();
 
-    let warmup = if elapsed.as_secs() < 30 { "  (warming up)" } else { "" };
+    let warmup = if elapsed.as_secs() < 30 {
+        "  (warming up)"
+    } else {
+        ""
+    };
     let text = format!(
         "GPU: {}{}  •  Elapsed: {:02}:{:02}:{:02}{}",
         snap.gpu_name, cost_str, h, m, s, warmup
     );
 
     let p = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title(" calibrate watch "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" calibrate watch "),
+        )
         .style(Style::default().fg(Color::Cyan));
     f.render_widget(p, area);
 }
@@ -137,7 +152,9 @@ fn render_status(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
     if !snap.nvml_available {
         lines.push(Line::from(Span::styled(
             "  ⚠  NVML unavailable — GPU metrics disabled (non-NVIDIA GPU or missing driver)",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )));
     }
     if snap.mfu_divergent {
@@ -165,8 +182,7 @@ fn render_status(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
     if lines.is_empty() {
         return;
     }
-    let p = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::TOP));
+    let p = Paragraph::new(lines).block(Block::default().borders(Borders::TOP));
     f.render_widget(p, area);
 }
 
@@ -194,10 +210,7 @@ fn render_mfu_gauge(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
 
     let label = format!(
         "MFU: {:.1}%{}  •  {:.1} / {:.1} TFLOPS  (target >45%)",
-        mfu,
-        confidence,
-        snap.mfu.actual_tflops.0,
-        snap.mfu.peak_tflops.0,
+        mfu, confidence, snap.mfu.actual_tflops.0, snap.mfu.peak_tflops.0,
     );
 
     let gauge = Gauge::default()
@@ -232,8 +245,11 @@ fn render_breakdown(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
         breakdown_line("Memory alloc     ", bd.memory_alloc_pct, Color::Magenta),
     ];
 
-    let p = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Time Breakdown "));
+    let p = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Time Breakdown "),
+    );
     f.render_widget(p, area);
 }
 
@@ -257,7 +273,11 @@ fn render_thermal_memory(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
         "OK"
     };
 
-    let erratic = if snap.step_time_erratic { "  •  Steps: ERRATIC" } else { "" };
+    let erratic = if snap.step_time_erratic {
+        "  •  Steps: ERRATIC"
+    } else {
+        ""
+    };
     let step_str = if snap.step_time_ms_mean > 0.0 {
         format!("  •  Step: {:.0} ms avg{}", snap.step_time_ms_mean, erratic)
     } else {
@@ -291,7 +311,9 @@ fn render_thermal_memory(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
 fn render_per_gpu(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
     let mut lines = vec![Line::from(Span::styled(
         "  GPU   SM util   VRAM used   Temp",
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
     ))];
 
     for g in &snap.per_gpu {
@@ -299,18 +321,13 @@ fn render_per_gpu(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
         lines.push(Line::from(Span::styled(
             format!(
                 "  GPU{:<3} {:>6.1}%{}   {:>8}   {}",
-                g.gpu_index,
-                g.sm_utilization.0,
-                diverge_marker,
-                g.vram_used_mib,
-                g.temperature,
+                g.gpu_index, g.sm_utilization.0, diverge_marker, g.vram_used_mib, g.temperature,
             ),
             Style::default().fg(Color::Cyan),
         )));
     }
 
-    let p = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Per-GPU "));
+    let p = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Per-GPU "));
     f.render_widget(p, area);
 }
 

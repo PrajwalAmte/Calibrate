@@ -20,12 +20,12 @@ pub struct NvmlCollector {
 }
 
 impl NvmlCollector {
-    pub fn new(
-        pid: u32,
-        interval: Duration,
-        shared_cpu: Arc<parking_lot::Mutex<Percent>>,
-    ) -> Self {
-        Self { pid, interval, shared_cpu }
+    pub fn new(pid: u32, interval: Duration, shared_cpu: Arc<parking_lot::Mutex<Percent>>) -> Self {
+        Self {
+            pid,
+            interval,
+            shared_cpu,
+        }
     }
 
     /// Attempt to initialize NVML once; returns an error with a helpful
@@ -101,7 +101,10 @@ impl MetricsCollector for NvmlCollector {
             }
 
             std::thread::sleep(self.interval);
-            debug!("NvmlCollector tick (pid={}, interval={:?})", self.pid, self.interval);
+            debug!(
+                "NvmlCollector tick (pid={}, interval={:?})",
+                self.pid, self.interval
+            );
         }
     }
 }

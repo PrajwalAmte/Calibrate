@@ -28,12 +28,21 @@ impl SummaryReport {
         println!();
 
         if snapshot.nvml_available {
-            println!("  MFU              : {:.1}%  (target: >45%)", snapshot.mfu.mfu_pct.0);
+            println!(
+                "  MFU              : {:.1}%  (target: >45%)",
+                snapshot.mfu.mfu_pct.0
+            );
             println!("  Peak MFU         : {:.1}%", snapshot.peak_mfu_pct);
             if let Some(ref p) = snapshot.mfu_percentiles {
-                println!("  MFU p50/p75/p95  : {:.1}% / {:.1}% / {:.1}%", p.p50, p.p75, p.p95);
+                println!(
+                    "  MFU p50/p75/p95  : {:.1}% / {:.1}% / {:.1}%",
+                    p.p50, p.p75, p.p95
+                );
             }
-            println!("  Peak VRAM        : {} / {}", snapshot.peak_vram_mib, snapshot.vram_total_mib);
+            println!(
+                "  Peak VRAM        : {} / {}",
+                snapshot.peak_vram_mib, snapshot.vram_total_mib
+            );
         }
 
         println!("  Temperature      : {}", snapshot.temperature);

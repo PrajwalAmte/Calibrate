@@ -66,17 +66,17 @@ impl<'a> MfuCalculator<'a> {
         }
 
         // Weighted average over the window; each sample contributes equally.
-        let (sm_sum, clock_ratio_sum, count) = window.iter().fold(
-            (0.0_f64, 0.0_f64, 0_usize),
-            |(sm, cr, n), s| {
-                let clock_ratio = if s.sm_clock_max_mhz.0 > 0 {
-                    s.sm_clock_mhz.0 as f64 / s.sm_clock_max_mhz.0 as f64
-                } else {
-                    1.0
-                };
-                (sm + s.sm_utilization.0 as f64, cr + clock_ratio, n + 1)
-            },
-        );
+        let (sm_sum, clock_ratio_sum, count) =
+            window
+                .iter()
+                .fold((0.0_f64, 0.0_f64, 0_usize), |(sm, cr, n), s| {
+                    let clock_ratio = if s.sm_clock_max_mhz.0 > 0 {
+                        s.sm_clock_mhz.0 as f64 / s.sm_clock_max_mhz.0 as f64
+                    } else {
+                        1.0
+                    };
+                    (sm + s.sm_utilization.0 as f64, cr + clock_ratio, n + 1)
+                });
 
         let avg_sm = sm_sum / count as f64;
         let avg_clock_ratio = clock_ratio_sum / count as f64;

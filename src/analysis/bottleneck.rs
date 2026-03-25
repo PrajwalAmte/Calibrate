@@ -31,7 +31,7 @@ impl BottleneckDetector {
         mfu: &MfuEstimate,
         breakdown: &TimeBreakdown,
         throttle_thermal: bool,
-        throttle_power: bool,
+        _throttle_power: bool,
         sm_clock_pct: f32, // (current / max) * 100
     ) -> Bottleneck {
         // Thermal throttling takes priority — it's an immediate hardware concern.
@@ -97,58 +97,67 @@ mod tests {
 
     #[test]
     fn data_loader_wins() {
-        let b = BottleneckDetector::detect(&mfu(20.0), &breakdown(28.0, 3.0, 1.0), false, false, 95.0);
+        let b =
+            BottleneckDetector::detect(&mfu(20.0), &breakdown(28.0, 3.0, 1.0), false, false, 95.0);
         assert_eq!(b, Bottleneck::DataLoader);
     }
 
     #[test]
     fn thermal_has_highest_priority() {
-        let b = BottleneckDetector::detect(&mfu(20.0), &breakdown(28.0, 9.0, 12.0), true, false, 95.0);
+        let b =
+            BottleneckDetector::detect(&mfu(20.0), &breakdown(28.0, 9.0, 12.0), true, false, 95.0);
         assert_eq!(b, Bottleneck::ThermalThrottle);
     }
 
     #[test]
     fn no_bottleneck_at_good_mfu() {
-        let b = BottleneckDetector::detect(&mfu(55.0), &breakdown(5.0, 2.0, 1.0), false, false, 97.0);
+        let b =
+            BottleneckDetector::detect(&mfu(55.0), &breakdown(5.0, 2.0, 1.0), false, false, 97.0);
         assert_eq!(b, Bottleneck::None);
     }
 
     #[test]
     fn cuda_sync_detected() {
-        let b = BottleneckDetector::detect(&mfu(30.0), &breakdown(5.0, 12.0, 1.0), false, false, 95.0);
+        let b =
+            BottleneckDetector::detect(&mfu(30.0), &breakdown(5.0, 12.0, 1.0), false, false, 95.0);
         assert_eq!(b, Bottleneck::CudaSync);
     }
 
     #[test]
     fn memory_fragmentation_detected() {
-        let b = BottleneckDetector::detect(&mfu(30.0), &breakdown(5.0, 2.0, 15.0), false, false, 95.0);
+        let b =
+            BottleneckDetector::detect(&mfu(30.0), &breakdown(5.0, 2.0, 15.0), false, false, 95.0);
         assert_eq!(b, Bottleneck::MemoryFragmentation);
     }
 
     #[test]
     fn clock_underspeed_detected() {
         // Low clock (80%), no other bottleneck triggers.
-        let b = BottleneckDetector::detect(&mfu(30.0), &breakdown(5.0, 2.0, 1.0), false, false, 80.0);
+        let b =
+            BottleneckDetector::detect(&mfu(30.0), &breakdown(5.0, 2.0, 1.0), false, false, 80.0);
         assert_eq!(b, Bottleneck::ClockUnderspeed);
     }
 
     #[test]
     fn below_target_mfu_when_no_specific_bottleneck() {
-        let b = BottleneckDetector::detect(&mfu(30.0), &breakdown(5.0, 2.0, 1.0), false, false, 95.0);
+        let b =
+            BottleneckDetector::detect(&mfu(30.0), &breakdown(5.0, 2.0, 1.0), false, false, 95.0);
         assert_eq!(b, Bottleneck::BelowTargetMfu);
     }
 
     #[test]
     fn thermal_overrides_data_loader() {
         // Even when data loader is high, thermal takes priority.
-        let b = BottleneckDetector::detect(&mfu(10.0), &breakdown(50.0, 0.0, 0.0), true, false, 95.0);
+        let b =
+            BottleneckDetector::detect(&mfu(10.0), &breakdown(50.0, 0.0, 0.0), true, false, 95.0);
         assert_eq!(b, Bottleneck::ThermalThrottle);
     }
 
     #[test]
     fn data_loader_overrides_cuda_sync() {
         // data_loader_pct=20 and cuda_sync_pct=12 — data loader should win.
-        let b = BottleneckDetector::detect(&mfu(20.0), &breakdown(20.0, 12.0, 1.0), false, false, 95.0);
+        let b =
+            BottleneckDetector::detect(&mfu(20.0), &breakdown(20.0, 12.0, 1.0), false, false, 95.0);
         assert_eq!(b, Bottleneck::DataLoader);
     }
 }

@@ -29,8 +29,7 @@ pub async fn run(args: ProbeArgs) -> anyhow::Result<()> {
     )?;
 
     // ── Attach to the process ─────────────────────────────────────────────
-    let process_info = attach::attach(args.pid)
-        .context("Failed to attach to training process")?;
+    let process_info = attach::attach(args.pid).context("Failed to attach to training process")?;
 
     eprintln!("Attached to PID {}", args.pid);
     eprintln!("  Primary GPU : {}", process_info.primary_gpu_name);
@@ -79,8 +78,8 @@ pub async fn run(args: ProbeArgs) -> anyhow::Result<()> {
     while received < n {
         match rx.recv_timeout(Duration::from_secs(10)) {
             Ok(sample) => {
-                let json = serde_json::to_string(&sample)
-                    .context("Failed to serialize RawSample")?;
+                let json =
+                    serde_json::to_string(&sample).context("Failed to serialize RawSample")?;
                 println!("{json}");
                 received += 1;
             }

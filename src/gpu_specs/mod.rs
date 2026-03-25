@@ -88,7 +88,11 @@ pub fn find_best_match<'a>(specs: &'a [GpuSpec], query: &str) -> Option<&'a GpuS
         .iter()
         .filter_map(|spec| {
             let score = match_score(&spec.name, &normalised);
-            if score > 0 { Some((spec, score)) } else { None }
+            if score > 0 {
+                Some((spec, score))
+            } else {
+                None
+            }
         })
         .max_by_key(|(_, score)| *score)
         .map(|(spec, _)| spec)
@@ -145,7 +149,10 @@ mod tests {
     fn normalize_hyphenated_with_memory() {
         assert_eq!(normalize_for_match("NVIDIA A100-SXM4-80GB"), "a100 sxm4");
         assert_eq!(normalize_for_match("NVIDIA A100-PCIE-40GB"), "a100 pcie");
-        assert_eq!(normalize_for_match("NVIDIA Tesla V100-SXM2-32GB"), "v100 sxm2");
+        assert_eq!(
+            normalize_for_match("NVIDIA Tesla V100-SXM2-32GB"),
+            "v100 sxm2"
+        );
     }
 
     #[test]
@@ -179,22 +186,35 @@ mod tests {
     fn match_score_a10g_beats_a10_for_a10g_query() {
         let score_a10g = match_score("A10G", "a10g");
         let score_a10 = match_score("A10", "a10g");
-        assert!(score_a10g > score_a10, "A10G ({score_a10g}) should score higher than A10 ({score_a10}) for 'A10G' query");
+        assert!(
+            score_a10g > score_a10,
+            "A10G ({score_a10g}) should score higher than A10 ({score_a10}) for 'A10G' query"
+        );
     }
 
     #[test]
     fn match_score_a10_matches_a10_not_a10g() {
         // "a10g".starts_with("a10g") only; "a10".starts_with("a10g") is false.
         assert!(match_score("A10", "a10") > 0);
-        assert_eq!(match_score("A10G", "a10"), 0, "A10G should not match plain 'a10' query");
+        assert_eq!(
+            match_score("A10G", "a10"),
+            0,
+            "A10G should not match plain 'a10' query"
+        );
     }
 
     // ── find_best_match / FallbackRepository integration ─────────────────
 
     #[test]
     fn fallback_resolves_geforce_rtx_3090() {
-        let spec = FallbackRepository.get_by_name("NVIDIA GeForce RTX 3090").unwrap();
-        assert!((spec.bf16_tflops - 35.6).abs() < 0.1, "unexpected tflops: {}", spec.bf16_tflops);
+        let spec = FallbackRepository
+            .get_by_name("NVIDIA GeForce RTX 3090")
+            .unwrap();
+        assert!(
+            (spec.bf16_tflops - 35.6).abs() < 0.1,
+            "unexpected tflops: {}",
+            spec.bf16_tflops
+        );
         assert_eq!(spec.vram_gib, 24);
     }
 
@@ -206,28 +226,45 @@ mod tests {
 
     #[test]
     fn fallback_resolves_a100_sxm_from_nvml_name() {
-        let spec = FallbackRepository.get_by_name("NVIDIA A100-SXM4-80GB").unwrap();
+        let spec = FallbackRepository
+            .get_by_name("NVIDIA A100-SXM4-80GB")
+            .unwrap();
         // Should match "A100 SXM", not PCIe.
-        assert!(spec.name.contains("SXM"), "expected SXM variant, got: {}", spec.name);
+        assert!(
+            spec.name.contains("SXM"),
+            "expected SXM variant, got: {}",
+            spec.name
+        );
     }
 
     #[test]
     fn fallback_resolves_a100_pcie_from_nvml_name() {
-        let spec = FallbackRepository.get_by_name("NVIDIA A100-PCIE-40GB").unwrap();
-        assert!(spec.name.to_lowercase().contains("pcie"), "expected PCIe variant, got: {}", spec.name);
+        let spec = FallbackRepository
+            .get_by_name("NVIDIA A100-PCIE-40GB")
+            .unwrap();
+        assert!(
+            spec.name.to_lowercase().contains("pcie"),
+            "expected PCIe variant, got: {}",
+            spec.name
+        );
     }
 
     #[test]
     fn fallback_a10g_disambiguated_from_a10() {
         let a10g = FallbackRepository.get_by_name("NVIDIA A10G").unwrap();
         let a10 = FallbackRepository.get_by_name("NVIDIA A10").unwrap();
-        assert!(a10g.name.to_uppercase().contains("A10G"), "got: {}", a10g.name);
+        assert!(
+            a10g.name.to_uppercase().contains("A10G"),
+            "got: {}",
+            a10g.name
+        );
         assert_eq!(a10.name.to_uppercase().trim(), "A10", "got: {}", a10.name);
     }
 
     #[test]
     fn fallback_unknown_gpu_returns_none() {
-        assert!(FallbackRepository.get_by_name("NVIDIA RTX Unknown 9999X").is_none());
+        assert!(FallbackRepository
+            .get_by_name("NVIDIA RTX Unknown 9999X")
+            .is_none());
     }
 }
-

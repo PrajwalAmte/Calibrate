@@ -11,11 +11,15 @@ pub struct Celsius(pub f32);
 pub struct Watts(pub f32);
 
 /// Memory size in Mebibytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct Mib(pub u64);
 
 /// Clock frequency in MHz.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct Mhz(pub u32);
 
 /// A percentage value in the range 0.0 – 100.0.
@@ -28,6 +32,7 @@ impl Percent {
         Self(v.clamp(0.0, 100.0))
     }
 
+    #[allow(dead_code)]
     pub fn as_f32(self) -> f32 {
         self.0
     }

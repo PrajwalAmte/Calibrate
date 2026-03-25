@@ -87,8 +87,8 @@ impl MonitoringSession<state::Sampling> {
 
         // hdrhistogram tracks MFU * 10 (integer tenths of a percent, 0–1000)
         // so we get 0.1% precision without floating-point histogram keys.
-        let mut mfu_hist: Histogram<u64> = Histogram::new_with_max(1000, 3)
-            .expect("valid hdrhistogram config");
+        let mut mfu_hist: Histogram<u64> =
+            Histogram::new_with_max(1000, 3).expect("valid hdrhistogram config");
 
         let mut peak_mfu: f32 = 0.0;
         let mut peak_vram = Mib(0);
@@ -114,12 +114,15 @@ impl MonitoringSession<state::Sampling> {
                         peak_vram = sample.vram_used_mib;
                     }
 
-                    gpu_snapshots.insert(sample.gpu_index, GpuSnapshot {
-                        gpu_index: sample.gpu_index,
-                        sm_utilization: sample.sm_utilization,
-                        vram_used_mib: sample.vram_used_mib,
-                        temperature: sample.temperature,
-                    });
+                    gpu_snapshots.insert(
+                        sample.gpu_index,
+                        GpuSnapshot {
+                            gpu_index: sample.gpu_index,
+                            sm_utilization: sample.sm_utilization,
+                            vram_used_mib: sample.vram_used_mib,
+                            temperature: sample.temperature,
+                        },
+                    );
 
                     window.push(sample.clone());
                     steps_observed += 1;
@@ -184,8 +187,7 @@ impl MonitoringSession<state::Sampling> {
                     });
 
                     let vram_util = Percent::clamped(
-                        sample.vram_used_mib.0 as f32
-                            / sample.vram_total_mib.0.max(1) as f32
+                        sample.vram_used_mib.0 as f32 / sample.vram_total_mib.0.max(1) as f32
                             * 100.0,
                     );
 
@@ -205,32 +207,25 @@ impl MonitoringSession<state::Sampling> {
                     if step_timestamps.len() > 30 {
                         step_timestamps.pop_front();
                     }
-                    let (step_time_ms_mean, step_time_erratic) =
-                        if step_timestamps.len() >= 5 {
-                            let ts: Vec<u64> = step_timestamps.iter().copied().collect();
-                            let deltas: Vec<f64> = ts
-                                .windows(2)
-                                .map(|w| w[1].saturating_sub(w[0]) as f64)
-                                .collect();
-                            let mean =
-                                deltas.iter().sum::<f64>() / deltas.len() as f64;
-                            let variance = deltas
-                                .iter()
-                                .map(|d| (d - mean).powi(2))
-                                .sum::<f64>()
-                                / deltas.len() as f64;
-                            let cv = variance.sqrt() / mean.max(1.0);
-                            (mean as f32, cv > 0.3)
-                        } else {
-                            (0.0, false)
-                        };
+                    let (step_time_ms_mean, step_time_erratic) = if step_timestamps.len() >= 5 {
+                        let ts: Vec<u64> = step_timestamps.iter().copied().collect();
+                        let deltas: Vec<f64> = ts
+                            .windows(2)
+                            .map(|w| w[1].saturating_sub(w[0]) as f64)
+                            .collect();
+                        let mean = deltas.iter().sum::<f64>() / deltas.len() as f64;
+                        let variance = deltas.iter().map(|d| (d - mean).powi(2)).sum::<f64>()
+                            / deltas.len() as f64;
+                        let cv = variance.sqrt() / mean.max(1.0);
+                        (mean as f32, cv > 0.3)
+                    } else {
+                        (0.0, false)
+                    };
 
                     // Multi-GPU divergence: flag when SM util spread > 20 ppt.
                     let (mfu_divergent, gpu_mfu_divergence_ppt) = {
-                        let utils: Vec<f32> = gpu_snapshots
-                            .values()
-                            .map(|g| g.sm_utilization.0)
-                            .collect();
+                        let utils: Vec<f32> =
+                            gpu_snapshots.values().map(|g| g.sm_utilization.0).collect();
                         if utils.len() > 1 {
                             let max_u = utils.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                             let min_u = utils.iter().cloned().fold(f32::INFINITY, f32::min);
@@ -356,15 +351,8 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let (flume_tx, flume_rx) = flume::bounded(64);
 
-        let session = MonitoringSession::new(
-            9999,
-            test_spec(),
-            None,
-            snap_tx,
-            stop.clone(),
-            true,
-        )
-        .start();
+        let session =
+            MonitoringSession::new(9999, test_spec(), None, snap_tx, stop.clone(), true).start();
 
         let session_handle = tokio::spawn(session.run(flume_rx));
 
@@ -376,7 +364,9 @@ mod tests {
         drop(flume_tx);
 
         let done = session_handle.await.expect("session task must not panic");
-        let snapshot = done.final_snapshot().expect("must have at least one snapshot");
+        let snapshot = done
+            .final_snapshot()
+            .expect("must have at least one snapshot");
 
         assert_eq!(snapshot.steps_observed, 20);
         assert!(
@@ -427,7 +417,11 @@ mod tests {
         let done = handle.await.unwrap();
         let snapshot = done.final_snapshot().unwrap();
 
-        assert_eq!(snapshot.peak_vram_mib, Mib(9000), "peak VRAM should be 9000 MiB");
+        assert_eq!(
+            snapshot.peak_vram_mib,
+            Mib(9000),
+            "peak VRAM should be 9000 MiB"
+        );
     }
 
     #[tokio::test]
@@ -464,7 +458,8 @@ mod tests {
         let (flume_tx, flume_rx) = flume::bounded(64);
 
         let session =
-            MonitoringSession::new(9999, test_spec(), Some(2.50), snap_tx, stop.clone(), true).start();
+            MonitoringSession::new(9999, test_spec(), Some(2.50), snap_tx, stop.clone(), true)
+                .start();
         let handle = tokio::spawn(session.run(flume_rx));
 
         flume_tx.send(make_sample(20.0, 20.0, 8192)).unwrap();
@@ -498,7 +493,11 @@ mod tests {
         let done = handle.await.unwrap();
         let snapshot = done.final_snapshot().unwrap();
 
-        assert_eq!(snapshot.per_gpu.len(), 2, "both GPUs must appear in per_gpu");
+        assert_eq!(
+            snapshot.per_gpu.len(),
+            2,
+            "both GPUs must appear in per_gpu"
+        );
         assert!(
             snapshot.mfu_divergent,
             "divergence flag should be set when spread > 20 ppt"
@@ -528,8 +527,10 @@ mod tests {
         let done = handle.await.unwrap();
         let snapshot = done.final_snapshot().unwrap();
 
-        assert!(!snapshot.mfu_divergent, "single GPU must never trigger divergence flag");
+        assert!(
+            !snapshot.mfu_divergent,
+            "single GPU must never trigger divergence flag"
+        );
         assert_eq!(snapshot.gpu_mfu_divergence_ppt, 0.0);
     }
 }
-

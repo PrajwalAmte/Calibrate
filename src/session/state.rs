@@ -105,4 +105,3 @@ pub type SnapshotReceiver = tokio::sync::watch::Receiver<Option<SessionSnapshot>
 pub fn new_snapshot_channel() -> (SnapshotSender, SnapshotReceiver) {
     tokio::sync::watch::channel(None)
 }
-

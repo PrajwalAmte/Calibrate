@@ -21,8 +21,7 @@ use crate::session::state::new_snapshot_channel;
 
 /// Entry point for `calibrate watch`.
 pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
-    let process_info = attach::attach(args.pid)
-        .context("Failed to attach to training process")?;
+    let process_info = attach::attach(args.pid).context("Failed to attach to training process")?;
 
     // ── Container advisory — printed before the TUI takes over the screen ──
     match &process_info.container_context {
@@ -93,7 +92,6 @@ pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
         })
         .context("Failed to spawn ProcCollector thread")?;
 
-
     let (tx, rx) = flume::bounded::<crate::collectors::RawSample>(64);
 
     if process_info.nvml_available {
@@ -116,7 +114,6 @@ pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
             .context("Failed to spawn CPU-only collector thread")?;
     };
 
-
     let (snap_tx, mut snap_rx) = new_snapshot_channel();
     let session = MonitoringSession::<state::Initializing>::new(
         pid,
@@ -131,9 +128,9 @@ pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
     let session_handle = tokio::spawn(session.run(rx));
 
     let mut renderer: Box<dyn OutputRenderer> = match args.output {
-        OutputFormat::Terminal => Box::new(
-            TerminalRenderer::new().context("Failed to initialize terminal renderer")?,
-        ),
+        OutputFormat::Terminal => {
+            Box::new(TerminalRenderer::new().context("Failed to initialize terminal renderer")?)
+        }
         OutputFormat::Json => Box::new(JsonRenderer),
     };
 
@@ -166,10 +163,7 @@ pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
         }
     }
 
-
-    let done_session = session_handle
-        .await
-        .context("Session task panicked")?;
+    let done_session = session_handle.await.context("Session task panicked")?;
 
     let final_snapshot = done_session.final_snapshot();
     renderer.finish(final_snapshot.as_ref());

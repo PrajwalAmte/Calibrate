@@ -31,7 +31,11 @@ impl ProcCollector {
 
         // SAFETY: `sysconf` is a POSIX call with a well-defined return value.
         let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
-        let ticks_per_sec = if ticks_per_sec == 0 { 100 } else { ticks_per_sec };
+        let ticks_per_sec = if ticks_per_sec == 0 {
+            100
+        } else {
+            ticks_per_sec
+        };
 
         Ok(Self {
             pid,

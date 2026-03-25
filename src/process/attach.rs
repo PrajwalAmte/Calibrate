@@ -5,6 +5,7 @@ use crate::error::CalibrateError;
 /// Details about a successfully attached training process.
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
+    #[allow(dead_code)]
     pub pid: u32,
     /// NVML device indices the process is actively using.
     pub gpu_indices: Vec<u32>,
@@ -49,9 +50,11 @@ pub fn attach(pid: u32) -> Result<ProcessInfo, CalibrateError> {
     // NVML init failure is non-fatal: the tool degrades to CPU-only mode.
     let (gpu_indices, primary_gpu_name, nvml_available) = match find_gpu_indices(pid) {
         Ok((indices, name)) => (indices, name, true),
-        Err(CalibrateError::NvmlInit(_) | CalibrateError::NvmlUnavailable) => {
-            (vec![], "Unknown (non-NVIDIA GPU or missing driver)".to_string(), false)
-        }
+        Err(CalibrateError::NvmlInit(_) | CalibrateError::NvmlUnavailable) => (
+            vec![],
+            "Unknown (non-NVIDIA GPU or missing driver)".to_string(),
+            false,
+        ),
         Err(e) => return Err(e),
     };
 
@@ -73,8 +76,7 @@ pub fn attach(pid: u32) -> Result<ProcessInfo, CalibrateError> {
 /// Use NVML to enumerate all devices and return those that have the target
 /// PID in their running-compute-processes list.
 fn find_gpu_indices(pid: u32) -> Result<(Vec<u32>, String), CalibrateError> {
-    let nvml = nvml_wrapper::Nvml::init()
-        .map_err(|e| CalibrateError::NvmlInit(e.to_string()))?;
+    let nvml = nvml_wrapper::Nvml::init().map_err(|e| CalibrateError::NvmlInit(e.to_string()))?;
 
     let device_count = nvml
         .device_count()
@@ -94,9 +96,7 @@ fn find_gpu_indices(pid: u32) -> Result<(Vec<u32>, String), CalibrateError> {
 
         if processes.iter().any(|p| p.pid == pid) {
             if indices.is_empty() {
-                primary_name = device
-                    .name()
-                    .unwrap_or_else(|_| "Unknown GPU".to_string());
+                primary_name = device.name().unwrap_or_else(|_| "Unknown GPU".to_string());
             }
             indices.push(i);
         }
@@ -160,8 +160,10 @@ mod tests {
     fn permission_denied_error_mentions_sudo() {
         let err = CalibrateError::PermissionDenied { pid: 7 };
         let msg = err.to_string();
-        assert!(msg.contains("sudo") || msg.contains("permission") || msg.contains("insufficient"),
-            "error should mention privilege escalation: {msg}");
+        assert!(
+            msg.contains("sudo") || msg.contains("permission") || msg.contains("insufficient"),
+            "error should mention privilege escalation: {msg}"
+        );
     }
 
     #[test]

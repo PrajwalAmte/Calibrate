@@ -13,8 +13,7 @@ impl crate::gpu_specs::SpecsRepository for FallbackRepository {
     fn get_by_name(&self, name: &str) -> Option<crate::gpu_specs::GpuSpec> {
         // Parse once per lookup.  Because the binary is small (< 4 KB of JSON)
         // and lookups happen only at startup, the cost is negligible.
-        let specs: Vec<crate::gpu_specs::GpuSpec> =
-            serde_json::from_str(FALLBACK_DATA).ok()?;
+        let specs: Vec<crate::gpu_specs::GpuSpec> = serde_json::from_str(FALLBACK_DATA).ok()?;
         crate::gpu_specs::find_best_match(&specs, name).cloned()
     }
 }
@@ -37,8 +36,7 @@ mod tests {
 
     #[test]
     fn all_specs_have_positive_tflops() {
-        let specs: Vec<crate::gpu_specs::GpuSpec> =
-            serde_json::from_str(FALLBACK_DATA).unwrap();
+        let specs: Vec<crate::gpu_specs::GpuSpec> = serde_json::from_str(FALLBACK_DATA).unwrap();
         for spec in &specs {
             assert!(
                 spec.bf16_tflops > 0.0,
@@ -61,12 +59,17 @@ mod tests {
         // down: HttpSpecsClient.get_by_name returns None, so FallbackRepository
         // is the only source.  Verify it resolves known names independently.
         let result = FallbackRepository.get_by_name("NVIDIA GeForce RTX 4090");
-        assert!(result.is_some(), "should resolve RTX 4090 from baked-in table");
+        assert!(
+            result.is_some(),
+            "should resolve RTX 4090 from baked-in table"
+        );
     }
 
     #[test]
     fn v100_sxm2_matches_hyphenated_nvml_name() {
-        let spec = FallbackRepository.get_by_name("NVIDIA Tesla V100-SXM2-32GB").unwrap();
+        let spec = FallbackRepository
+            .get_by_name("NVIDIA Tesla V100-SXM2-32GB")
+            .unwrap();
         assert!(
             spec.name.contains("V100"),
             "expected V100, got {}",

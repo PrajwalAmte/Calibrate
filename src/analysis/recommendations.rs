@@ -175,4 +175,3 @@ mod tests {
         assert!(r.expected_mfu_gain_ppt > 0.0);
     }
 }
-

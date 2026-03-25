@@ -1,12 +1,11 @@
 use thiserror::Error;
 
 /// Top-level error type for calibrate.
-///
 /// Each variant captures failures at a specific subsystem boundary.
 /// Downstream code converts these into `anyhow::Error` at the command layer.
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum CalibrateError {
-    // ── Process attachment ────────────────────────────────────────────────
     #[error("process {pid} not found — is the training job still running?")]
     ProcessNotFound { pid: u32 },
 
@@ -16,7 +15,6 @@ pub enum CalibrateError {
     #[error("insufficient permissions to read /proc/{pid}; try running with sudo")]
     PermissionDenied { pid: u32 },
 
-    // ── NVML ──────────────────────────────────────────────────────────────
     #[error("NVML initialization failed: {0}\nIs the nvidia-smi driver installed?")]
     NvmlInit(String),
 
@@ -26,7 +24,6 @@ pub enum CalibrateError {
     #[error("NVML is not available on this system (non-NVIDIA GPU detected)")]
     NvmlUnavailable,
 
-    // ── /proc sampling ────────────────────────────────────────────────────
     #[error("failed to read /proc/{pid}/stat: {source}")]
     ProcRead {
         pid: u32,
@@ -37,31 +34,29 @@ pub enum CalibrateError {
     #[error("unexpected /proc/{pid}/stat format")]
     ProcFormat { pid: u32 },
 
-    // ── GPU spec database ─────────────────────────────────────────────────
     #[error("GPU spec fetch failed: {0}")]
     SpecFetch(String),
 
     #[error("GPU model '{name}' not found in spec database — MFU will be estimated")]
     SpecNotFound { name: String },
 
-    // ── Container / environment ───────────────────────────────────────────
-    #[error("process {pid} not found inside this container PID namespace.\n\
+    #[error(
+        "process {pid} not found inside this container PID namespace.\n\
              \n\
              If the training process is on the HOST, re-run calibrate there:\n\
              \n\
              • Docker : docker exec -it <container> calibrate watch --pid {pid}\n\
              • Kubernetes: kubectl exec -it <pod> -- calibrate watch --pid {pid}\n\
-             • Host   : sudo calibrate watch --pid {pid}")]
+             • Host   : sudo calibrate watch --pid {pid}"
+    )]
     ContainerPidIsolation { pid: u32 },
 
-    // ── Sampling ──────────────────────────────────────────────────────────
     #[error("training process {pid} exited before enough samples were collected")]
     ProcessExited { pid: u32 },
 
     #[error("sampling channel closed unexpectedly")]
     ChannelClosed,
 
-    // ── I/O ───────────────────────────────────────────────────────────────
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

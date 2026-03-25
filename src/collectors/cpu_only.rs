@@ -37,7 +37,10 @@ impl MetricsCollector for CpuOnlyCollector {
             }
         };
 
-        info!(pid = self.pid, "CpuOnlyCollector started (NVML unavailable)");
+        info!(
+            pid = self.pid,
+            "CpuOnlyCollector started (NVML unavailable)"
+        );
 
         loop {
             if stop.load(std::sync::atomic::Ordering::Relaxed) {

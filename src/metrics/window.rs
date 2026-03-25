@@ -45,6 +45,7 @@ impl MetricsWindow {
     }
 
     /// Duration spanned by samples in the window.
+    #[allow(dead_code)]
     pub fn duration(&self) -> Duration {
         match (self.samples.front(), self.samples.back()) {
             (Some(first), Some(last)) => {
@@ -56,6 +57,7 @@ impl MetricsWindow {
     }
 
     /// Duration in seconds, as an `f64`.  Convenience wrapper over [`duration`].
+    #[allow(dead_code)]
     pub fn duration_secs(&self) -> f64 {
         self.duration().as_secs_f64()
     }

@@ -139,7 +139,11 @@ mod tests {
             w.push(sample(80.0, 20.0, 50.0));
         }
         let bd = TimeBreakdownInferrer::infer(&w);
-        assert!(bd.data_loader_pct > 60.0, "expected >60% data loader, got {:.1}%", bd.data_loader_pct);
+        assert!(
+            bd.data_loader_pct > 60.0,
+            "expected >60% data loader, got {:.1}%",
+            bd.data_loader_pct
+        );
         assert!(bd.forward_backward_pct > 20.0);
     }
 
@@ -185,10 +189,18 @@ mod tests {
     fn breakdown_percentages_sum_to_100() {
         let mut w = MetricsWindow::new(150);
         // Mixed workload touching every slot.
-        for _ in 0..4 { w.push(sample(80.0, 20.0, 50.0)); } // ForwardBackward
-        for _ in 0..3 { w.push(sample(5.0, 70.0, 20.0)); }  // DataLoader
-        for _ in 0..2 { w.push(sample(5.0, 5.0, 10.0)); }   // CudaSync
-        for _ in 0..1 { w.push(sample(40.0, 10.0, 85.0)); } // MemoryAlloc
+        for _ in 0..4 {
+            w.push(sample(80.0, 20.0, 50.0));
+        } // ForwardBackward
+        for _ in 0..3 {
+            w.push(sample(5.0, 70.0, 20.0));
+        } // DataLoader
+        for _ in 0..2 {
+            w.push(sample(5.0, 5.0, 10.0));
+        } // CudaSync
+        for _ in 0..1 {
+            w.push(sample(40.0, 10.0, 85.0));
+        } // MemoryAlloc
         let bd = TimeBreakdownInferrer::infer(&w);
         let sum = bd.forward_backward_pct
             + bd.data_loader_pct
