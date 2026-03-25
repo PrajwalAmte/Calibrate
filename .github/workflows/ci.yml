@@ -30,13 +30,10 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -qy libnvidia-ml-dev || true
-          # If package is unavailable, create a minimal stub so the crate links.
           if ! pkg-config --libs nvidia-ml 2>/dev/null; then
             echo "NVML package not found; creating stub"
             sudo mkdir -p /usr/local/lib
-            sudo bash -c 'cat > /usr/local/lib/libnvidia-ml.so << "EOF"
-/* stub */
-EOF'
+            echo "/* stub */" | sudo tee /usr/local/lib/libnvidia-ml.so > /dev/null
           fi
 
       - name: Check formatting
