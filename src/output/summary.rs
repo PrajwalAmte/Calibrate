@@ -12,9 +12,7 @@ impl SummaryReport {
         let s = elapsed.as_secs() % 60;
 
         println!();
-        println!("═══════════════════════════════════════════════════");
-        println!("  calibrate watch — Session Summary");
-        println!("═══════════════════════════════════════════════════");
+        println!("calibrate watch — Session Summary");
 
         if !snapshot.nvml_available {
             println!("  ⚠  NVML unavailable — GPU metrics were not collected.");
@@ -103,8 +101,6 @@ impl SummaryReport {
             );
             println!();
         }
-
-        println!("═══════════════════════════════════════════════════");
     }
 }
 
