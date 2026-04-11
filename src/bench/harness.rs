@@ -438,11 +438,8 @@ fn budget_guard(
 
 /// Return `true` when the error message suggests an out-of-memory condition.
 fn is_oom_error(e: &anyhow::Error) -> bool {
-    let msg = format!("{e:?}").to_lowercase();
-    msg.contains("out of memory")
-        || msg.contains("cuda error")
-        || msg.contains("oom")
-        || msg.contains("cudaerrormemoryal")
+    let msg = format!("{e}").to_lowercase();
+    msg.contains("out of memory") || msg.contains("cuda error") || msg.contains("oom")
 }
 
 /// Log a warning if processes other than the current one are using the GPU.
