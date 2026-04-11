@@ -189,7 +189,7 @@ fn build_rationale(listing: &RankedListing, budget: Option<f64>) -> String {
 
     let over_budget = budget
         .zip(listing.cost_range.as_ref())
-        .map_or(false, |(b, c)| c.low_usd > b);
+        .is_some_and(|(b, c)| c.low_usd > b);
 
     let base = format!(
         "{} {} ({:.0} GiB VRAM) offers {} for this workload.",

@@ -82,8 +82,8 @@ impl CandleRuntime {
         for b in 0..batch {
             let start = b * cols;
             let end = ((b + 1) * cols).min(n);
-            for i in start..end {
-                acc += a[i] * a[i];
+            for &val in a.iter().skip(start).take(end - start) {
+                acc += val * val;
             }
         }
 

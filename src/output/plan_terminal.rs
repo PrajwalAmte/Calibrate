@@ -68,12 +68,12 @@ pub fn render(report: &PlanReport, budget: Option<f64>) {
 
         println!();
         println!(
-            "  {:<9}  {:<22}  {:>5}  {:>6}  {:>11}  {:>14}  {}",
-            "Provider", "GPU", "VRAM", "$/hr", "Duration", "Est. Cost", "Flags"
+            "  {:<9}  {:<22}  {:>5}  {:>6}  {:>11}  {:>14}  Flags",
+            "Provider", "GPU", "VRAM", "$/hr", "Duration", "Est. Cost"
         );
         println!(
-            "  {:-<9}  {:-<22}  {:-<5}  {:-<6}  {:-<11}  {:-<14}  {}",
-            "", "", "", "", "", "", "-----"
+            "  {:-<9}  {:-<22}  {:-<5}  {:-<6}  {:-<11}  {:-<14}  -----",
+            "", "", "", "", "", ""
         );
 
         let mut any_spot = false;
@@ -81,7 +81,7 @@ pub fn render(report: &PlanReport, budget: Option<f64>) {
         let mut any_unavailable = false;
 
         for l in &report.listings {
-            let is_rec = rec_key.map_or(false, |(p, g)| p == l.provider && g == l.gpu_model);
+            let is_rec = rec_key.is_some_and(|(p, g)| p == l.provider && g == l.gpu_model);
             let marker = if is_rec { ">" } else { " " };
 
             let flags_str = format_flags(&l.flags, &l.availability);
@@ -97,7 +97,7 @@ pub fn render(report: &PlanReport, budget: Option<f64>) {
 
             let over = budget
                 .zip(l.cost_range.as_ref())
-                .map_or(false, |(b, c)| c.low_usd > b);
+                .is_some_and(|(b, c)| c.low_usd > b);
 
             let vram_str = format!("{:.0}G", l.vram_gib);
             let dur_str = l
