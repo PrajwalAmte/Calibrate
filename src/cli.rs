@@ -89,7 +89,7 @@ pub enum OutputFormat {
     Json,
 }
 
-// ── calibrate bench ────────────────────────────────────────────────────────────
+// ── calibrate bench───
 
 /// Arguments accepted by `calibrate bench`.
 #[derive(Debug, clap::Args)]
@@ -154,7 +154,7 @@ pub enum BenchOutputFormat {
     Markdown,
 }
 
-// ── calibrate plan ─────────────────────────────────────────────────────────────
+// ── calibrate plan────
 
 /// Arguments accepted by `calibrate plan`.
 #[derive(Debug, clap::Args)]

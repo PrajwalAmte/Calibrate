@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::bench::input::{BenchInput, ModelFormat};
 use crate::bench::runtime::{Runtime, RuntimeDescriptor};
 
-// ── Embedded Python driver script ─────────────────────────────────────────────
+// ── Embedded Python driver script
 
 /// Driver that converts an ONNX model to a TensorRT engine, runs inference,
 /// and streams timing results back as JSONL.
@@ -121,7 +121,7 @@ elapsed = time.perf_counter() - (deadline - tput_window_s)
 emit({"type": "throughput_rps", "value": count / elapsed if elapsed > 0 else 0})
 "#;
 
-// ── Deserialization helpers ───────────────────────────────────────────────────
+// ── Deserialization helpers
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -151,7 +151,7 @@ fn parse_driver_output(stdout: &[u8]) -> Result<Vec<DriverRecord>> {
     Ok(records)
 }
 
-// ── TensorRtRuntime ───────────────────────────────────────────────────────────
+// ── TensorRtRuntime
 
 pub struct TensorRtRuntime {
     model_path: Option<std::path::PathBuf>,

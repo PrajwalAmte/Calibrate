@@ -116,7 +116,7 @@ pub async fn run(args: BenchArgs) -> Result<()> {
     Ok(())
 }
 
-// ── GPU detection ─────────────────────────────────────────────────────────────
+// ── GPU detection
 
 fn detect_gpu_device() -> Option<u32> {
     nvml_wrapper::Nvml::init()
@@ -124,7 +124,7 @@ fn detect_gpu_device() -> Option<u32> {
         .and_then(|nvml| nvml.device_by_index(0).ok().map(|_| 0u32))
 }
 
-// ── Recommendation logic ──────────────────────────────────────────────────────
+// ── Recommendation logic
 
 pub(crate) fn build_recommendation(
     results: &[crate::bench::BenchResult],

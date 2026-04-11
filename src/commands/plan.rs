@@ -12,13 +12,13 @@ use crate::plan::{
 };
 
 pub async fn run(args: PlanArgs) -> Result<()> {
-    // ── Step 1: Resolve model ─────────────────────────────────────────────────
+    // ── Step 1: Resolve model──────
     eprintln!("Resolving model '{}'...", args.model);
     let spec = crate::plan::model::resolver::resolve(&args.model, args.params_b)
         .await
         .with_context(|| format!("could not resolve model '{}'", args.model))?;
 
-    // ── Step 2: Estimate VRAM ─────────────────────────────────────────────────
+    // ── Step 2: Estimate VRAM──────
     let breakdown = vram::estimate(
         &spec,
         args.method,
@@ -36,7 +36,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         fitting_tiers: fitting,
     };
 
-    // ── Step 3: Fetch provider listings concurrently ─────────────────────────
+    // ── Step 3: Fetch provider listings concurrently──────
     eprintln!("Fetching live GPU pricing...");
     let (raw_listings, mut all_skipped) = providers::fetch_all(args.providers.as_deref()).await;
 
@@ -44,7 +44,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         eprintln!("Warning: all providers failed to respond. Check your network connection.");
     }
 
-    // ── Step 4: Filter by availability preference ────────────────────────────
+    // ── Step 4: Filter by availability preference──────────
     let filtered: Vec<GpuListing> = raw_listings
         .into_iter()
         .filter(|l| {
@@ -57,7 +57,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         })
         .collect();
 
-    // ── Step 5: Filter by VRAM, add duration + cost estimates ────────────────
+    // ── Step 5: Filter by VRAM, add duration + cost estimates
     let mfu = args.mfu.unwrap_or(0.30);
 
     let mut ranked: Vec<RankedListing> = filtered
@@ -90,7 +90,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // ── Step 6: Budget filter note (include in skipped if nothing fits) ───────
+    // ── Step 6: Budget filter note (include in skipped if nothing fits)
     if let Some(budget) = args.budget {
         let affordable = ranked
             .iter()
@@ -112,10 +112,10 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         }
     }
 
-    // ── Step 7: Build recommendation ─────────────────────────────────────────
+    // ── Step 7: Build recommendation────────────
     let recommendation = build_recommendation(&ranked, args.budget);
 
-    // ── Step 8: Render ────────────────────────────────────────────────────────
+    // ── Step 8: Render──────────────
     let report = PlanReport {
         workload,
         listings: ranked,
@@ -132,7 +132,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     Ok(())
 }
 
-// ── Recommendation logic ───────────────────────────────────────────────────────
+// ── Recommendation logic────────
 
 fn build_recommendation(
     ranked: &[RankedListing],

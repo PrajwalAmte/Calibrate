@@ -8,7 +8,7 @@ pub mod vram;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-// ── VRAM breakdown ─────────────────────────────────────────────────────────────
+// ── VRAM breakdown────
 
 /// Per-component breakdown of estimated VRAM usage for a training run.
 ///
@@ -34,7 +34,7 @@ pub struct VramBreakdown {
     pub total_gib: f64,
 }
 
-// ── Workload summary ───────────────────────────────────────────────────────────
+// ── Workload summary─
 
 /// Resolved model properties and the VRAM estimate derived from them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,7 +53,7 @@ pub struct WorkloadSummary {
     pub fitting_tiers: Vec<String>,
 }
 
-// ── Provider listing ───────────────────────────────────────────────────────────
+// ── Provider listing
 
 /// Availability of a GPU instance at query time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,7 +141,7 @@ impl CostRange {
     }
 }
 
-// ── Recommendation ─────────────────────────────────────────────────────────────
+// ── Recommendation─
 
 /// The tool's top pick, plus an optional conservative alternative.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,7 +156,7 @@ pub struct PlanRecommendation {
     pub safe_alternative: Option<RankedListing>,
 }
 
-// ── Provider skip ──────────────────────────────────────────────────────────────
+// ── Provider skip──
 
 /// A provider whose listings could not be fetched, with the reason.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,7 +165,7 @@ pub struct SkippedProvider {
     pub reason: String,
 }
 
-// ── Top-level report ────────────────────────────────────────────────────────────
+// ── Top-level report─────
 
 /// Complete output of a `calibrate plan` run, suitable for serialization to JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]

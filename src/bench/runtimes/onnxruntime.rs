@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::bench::input::{BenchInput, ModelFormat};
 use crate::bench::runtime::{Runtime, RuntimeDescriptor};
 
-// ── Embedded Python driver script ─────────────────────────────────────────────
+// ── Embedded Python driver script
 
 /// A self-contained Python script written to a tempfile and executed as a
 /// subprocess. Returns newline-delimited JSON timing records to stdout and
@@ -100,7 +100,7 @@ elapsed = time.perf_counter() - (deadline - tput_window_s)
 emit({"type": "throughput_rps", "value": count / elapsed if elapsed > 0 else 0})
 "#;
 
-// ── OnnxRuntime struct ────────────────────────────────────────────────────────
+// ── OnnxRuntime struct
 
 pub struct OnnxRuntime {
     model_path: Option<std::path::PathBuf>,
@@ -147,7 +147,7 @@ impl OnnxRuntime {
     }
 }
 
-// ── Deserialization helpers ───────────────────────────────────────────────────
+// ── Deserialization helpers
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -177,7 +177,7 @@ fn parse_driver_output(stdout: &[u8]) -> Result<Vec<DriverRecord>> {
     Ok(records)
 }
 
-// ── Runtime impl ─────────────────────────────────────────────────────────────
+// ── Runtime impl
 
 impl Runtime for OnnxRuntime {
     fn name(&self) -> &str {

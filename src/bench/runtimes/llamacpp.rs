@@ -128,7 +128,7 @@ impl Runtime for LlamaCppRuntime {
     }
 }
 
-// ── Output parsing ────────────────────────────────────────────────────────────
+// ── Output parsing
 
 /// Parse JSONL output from `llama-bench --output jsonl`.
 ///
@@ -202,7 +202,7 @@ fn parse_llama_bench_output(
     Ok(())
 }
 
-// ── Binary detection ──────────────────────────────────────────────────────────
+// ── Binary detection
 
 fn detect_binary() -> &'static str {
     for candidate in &["llama-bench", "llama-cli"] {

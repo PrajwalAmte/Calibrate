@@ -6,7 +6,7 @@ use crate::metrics::breakdown::TimeBreakdown;
 use crate::metrics::mfu::MfuEstimate;
 use crate::metrics::units::{Celsius, Mib, Percent, Watts};
 
-// ── Snapshot ─────────────────────────────────────────────────────────────────
+// ── Snapshot──────
 
 /// MFU distribution across the session window.
 /// Present once ≥15 samples have been collected.
@@ -62,7 +62,7 @@ pub struct SessionSnapshot {
     pub step_time_erratic: bool,
 }
 
-// ── Supporting types ──────────────────────────────────────────────────────────
+// ── Supporting types
 
 /// Cost breakdown at the current MFU versus the 45% target.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -83,7 +83,7 @@ pub struct GpuSnapshot {
     pub temperature: Celsius,
 }
 
-// ── Watch channel ─────────────────────────────────────────────────────────────
+// ── Watch channel──
 
 /// Sender half of the snapshot broadcast channel.
 ///

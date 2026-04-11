@@ -109,7 +109,7 @@ pub fn run_runtime_benchmarks(
             check_concurrent_gpu_processes(idx);
         }
 
-        // ── Delegated measurement (subprocess runtimes) ───────────────────
+        // ── Delegated measurement (subprocess runtimes)
         //
         // Subprocess runtimes (onnxruntime, torchscript, tensorrt, llamacpp)
         // run warm-up + measurement + throughput window entirely inside the
@@ -202,7 +202,7 @@ pub fn run_runtime_benchmarks(
             continue;
         }
 
-        // ── In-process measurement path (e.g. candle) ─────────────────────
+        // ── In-process measurement path (e.g. candle)
         //
         // The first infer() call has already executed one real forward pass;
         // check it succeeded before entering the measurement loop.
@@ -327,7 +327,7 @@ pub fn run_runtime_benchmarks(
     (results, skipped)
 }
 
-// ── Warm-up ──────────────────────────────────────────────────────────────────
+// ── Warm-up
 
 /// Run warm-up iterations and return the first iteration index at which
 /// performance stabilised (5-sample rolling std dev < 10% of the mean).
@@ -361,7 +361,7 @@ fn run_warmup(runtime: &mut dyn Runtime, input: &BenchInput, warmup_count: u32) 
     stable_at
 }
 
-// ── Sustained throughput ──────────────────────────────────────────────────────
+// ── Sustained throughput
 
 /// Measure sustained throughput by running `infer` as fast as possible for a
 /// fixed time window and dividing completed calls by elapsed wall-clock time.
@@ -384,7 +384,7 @@ fn measure_throughput(runtime: &mut dyn Runtime, input: &BenchInput, window: Dur
     }
 }
 
-// ── Iteration budget guard ────────────────────────────────────────────────────
+// ── Iteration budget guard
 
 /// Run one pilot iteration to estimate per-iteration cost.
 /// Reduce the iteration count if the full benchmark would exceed `max_total`.
@@ -434,7 +434,7 @@ fn budget_guard(
     reduced
 }
 
-// ── System-state utilities ────────────────────────────────────────────────────
+// ── System-state utilities
 
 /// Return `true` when the error message suggests an out-of-memory condition.
 fn is_oom_error(e: &anyhow::Error) -> bool {

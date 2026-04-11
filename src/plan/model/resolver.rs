@@ -95,7 +95,7 @@ impl HfConfig {
 /// On network failure or unknown model, returns `Err` with a clear error
 /// message that tells the user to pass `--params-b`.
 pub async fn resolve(model_id: &str, params_b_override: Option<f64>) -> Result<ModelSpec> {
-    // ── 1. Local path ─────────────────────────────────────────────────────────
+    // ── 1. Local path───────────
     let local = Path::new(model_id);
     if local.exists() {
         let config_path = if local.is_dir() {
@@ -112,7 +112,7 @@ pub async fn resolve(model_id: &str, params_b_override: Option<f64>) -> Result<M
         }
     }
 
-    // ── 2. Hugging Face Hub ───────────────────────────────────────────────────
+    // ── 2. Hugging Face Hub────
     let url = format!(
         "https://huggingface.co/{}/resolve/main/config.json",
         model_id

@@ -34,7 +34,7 @@ pub fn estimate(
     let params = spec.param_count_b * 1e9;
     let bytes_per_weight = bytes_per_param(quant);
 
-    // ── Model weights ──────────────────────────────────────────────────────────
+    // ── Model weights──
     let weights_gib = params * bytes_per_weight / GIB;
 
     // ── Trainable parameter count ──────────────────────────────────────────────
@@ -45,13 +45,13 @@ pub fn estimate(
         FinetuneMethod::Lora | FinetuneMethod::Qlora => params * LORA_ADAPTER_FRACTION,
     };
 
-    // ── Gradients (bf16 — 2 bytes per trainable parameter) ────────────────────
+    // ── Gradients (bf16 — 2 bytes per trainable parameter)────────
     let gradients_gib = trainable_params * 2.0 / GIB;
 
-    // ── Optimizer states (fp32 Adam: first + second moment = 8 bytes/param) ───
+    // ── Optimizer states (fp32 Adam: first + second moment = 8 bytes/param)
     let optimizer_gib = trainable_params * 8.0 / GIB;
 
-    // ── Activations (gradient checkpointing assumed) ───────────────────────────
+    // ── Activations (gradient checkpointing assumed)─────────
     // Without checkpointing: batch × seq × hidden × layers × 2 bytes.
     // With checkpointing:    divide by GRAD_CKPT_FACTOR (~4× reduction).
     let seq_len = DEFAULT_SEQ_LEN as f64;
@@ -63,7 +63,7 @@ pub fn estimate(
         / GRAD_CKPT_FACTOR
         / GIB;
 
-    // ── KV cache ───────────────────────────────────────────────────────────────
+    // ── KV cache────────────
     // 2 (K+V) × layers × kv_heads × head_dim × seq_len × batch × 2 bytes (bf16)
     let head_dim = spec.hidden_size as f64 / spec.num_heads.max(1) as f64;
     let kv_cache_gib = 2.0
@@ -75,10 +75,10 @@ pub fn estimate(
         * 2.0 // bf16
         / GIB;
 
-    // ── Sub-total before library savings ──────────────────────────────────────
+    // ── Sub-total before library savings─────────
     let subtotal = weights_gib + gradients_gib + optimizer_gib + activations_gib + kv_cache_gib;
 
-    // ── Library efficiency savings ─────────────────────────────────────────────
+    // ── Library efficiency savings───────────
     // Negative value — represents memory freed relative to the sub-total.
     let library_savings_gib = match optimizer_lib {
         // Unsloth: memory-efficient attention + optimized quantization, ~45% reduction.

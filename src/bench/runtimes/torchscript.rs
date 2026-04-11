@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::bench::input::{BenchInput, ModelFormat};
 use crate::bench::runtime::{Runtime, RuntimeDescriptor};
 
-// ── Embedded Python driver script ─────────────────────────────────────────────
+// ── Embedded Python driver script
 
 const DRIVER_SCRIPT: &str = r#"
 import sys, json, time
@@ -96,7 +96,7 @@ elapsed = time.perf_counter() - (deadline - tput_window_s)
 emit({"type": "throughput_rps", "value": count / elapsed if elapsed > 0 else 0})
 "#;
 
-// ── Deserialization helpers ───────────────────────────────────────────────────
+// ── Deserialization helpers
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -126,7 +126,7 @@ fn parse_driver_output(stdout: &[u8]) -> Result<Vec<DriverRecord>> {
     Ok(records)
 }
 
-// ── TorchScriptRuntime ────────────────────────────────────────────────────────
+// ── TorchScriptRuntime
 
 pub struct TorchScriptRuntime {
     model_path: Option<std::path::PathBuf>,

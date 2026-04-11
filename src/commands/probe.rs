@@ -28,13 +28,13 @@ pub async fn run(args: ProbeArgs) -> anyhow::Result<()> {
          On macOS, `calibrate bench` and `calibrate plan` are available."
     );
 
-    // ── Probe NVML availability first ────────────────────────────────────
+    // ── Probe NVML availability first─────
     NvmlCollector::probe().context(
         "NVML unavailable — is the NVIDIA driver installed and are you running as a user \
          with GPU access?",
     )?;
 
-    // ── Attach to the process ─────────────────────────────────────────────
+    // ── Attach to the process────────────
     let process_info = attach::attach(args.pid).context("Failed to attach to training process")?;
 
     eprintln!("Attached to PID {}", args.pid);
@@ -51,7 +51,7 @@ pub async fn run(args: ProbeArgs) -> anyhow::Result<()> {
     );
     eprintln!();
 
-    // ── Set up shared state ───────────────────────────────────────────────
+    // ── Set up shared state─────────────
     let stop = Arc::new(AtomicBool::new(false));
     let shared_cpu: Arc<parking_lot::Mutex<Percent>> =
         Arc::new(parking_lot::Mutex::new(Percent(0.0)));
@@ -79,7 +79,7 @@ pub async fn run(args: ProbeArgs) -> anyhow::Result<()> {
         })
         .context("Failed to spawn NVML collector thread")?;
 
-    // ── Collect N samples ─────────────────────────────────────────────────
+    // ── Collect N samples─────────────
     let mut received: u32 = 0;
     while received < n {
         match rx.recv_timeout(Duration::from_secs(10)) {
@@ -103,7 +103,7 @@ pub async fn run(args: ProbeArgs) -> anyhow::Result<()> {
         }
     }
 
-    // ── Clean up ──────────────────────────────────────────────────────────
+    // ── Clean up────────────────────
     stop.store(true, Ordering::Relaxed);
 
     if received == n {
