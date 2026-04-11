@@ -215,7 +215,11 @@ impl Runtime for TorchScriptRuntime {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("torchscript driver exited with {}: {}", output.status, stderr);
+            bail!(
+                "torchscript driver exited with {}: {}",
+                output.status,
+                stderr
+            );
         }
 
         let records = parse_driver_output(&output.stdout)?;

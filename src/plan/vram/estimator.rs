@@ -144,7 +144,13 @@ mod tests {
     #[test]
     fn full_precision_7b_weights_approx_13gib() {
         // 7 × 10^9 × 2 bytes / 2^30 ≈ 13.04 GiB
-        let bd = estimate(&llama_7b(), FinetuneMethod::Full, OptimizerLib::None, QuantLevel::None, 1);
+        let bd = estimate(
+            &llama_7b(),
+            FinetuneMethod::Full,
+            OptimizerLib::None,
+            QuantLevel::None,
+            1,
+        );
         assert!(
             (bd.weights_gib - 13.04).abs() < 0.1,
             "expected ~13.0 GiB, got {:.2}",
@@ -154,8 +160,20 @@ mod tests {
 
     #[test]
     fn fourbit_weights_half_of_eightbit() {
-        let bd8 = estimate(&llama_7b(), FinetuneMethod::Lora, OptimizerLib::None, QuantLevel::EightBit, 1);
-        let bd4 = estimate(&llama_7b(), FinetuneMethod::Lora, OptimizerLib::None, QuantLevel::FourBit, 1);
+        let bd8 = estimate(
+            &llama_7b(),
+            FinetuneMethod::Lora,
+            OptimizerLib::None,
+            QuantLevel::EightBit,
+            1,
+        );
+        let bd4 = estimate(
+            &llama_7b(),
+            FinetuneMethod::Lora,
+            OptimizerLib::None,
+            QuantLevel::FourBit,
+            1,
+        );
         assert!(
             (bd8.weights_gib / bd4.weights_gib - 2.0).abs() < 0.01,
             "4-bit weights should be exactly half of 8-bit"
@@ -164,8 +182,20 @@ mod tests {
 
     #[test]
     fn lora_gradients_are_about_1pct_of_full() {
-        let bd_full = estimate(&llama_7b(), FinetuneMethod::Full, OptimizerLib::None, QuantLevel::None, 1);
-        let bd_lora = estimate(&llama_7b(), FinetuneMethod::Lora, OptimizerLib::None, QuantLevel::None, 1);
+        let bd_full = estimate(
+            &llama_7b(),
+            FinetuneMethod::Full,
+            OptimizerLib::None,
+            QuantLevel::None,
+            1,
+        );
+        let bd_lora = estimate(
+            &llama_7b(),
+            FinetuneMethod::Lora,
+            OptimizerLib::None,
+            QuantLevel::None,
+            1,
+        );
         let ratio = bd_lora.gradients_gib / bd_full.gradients_gib;
         assert!(
             (ratio - LORA_ADAPTER_FRACTION).abs() < 0.001,
@@ -175,8 +205,20 @@ mod tests {
 
     #[test]
     fn unsloth_reduces_total_by_40_to_60_pct() {
-        let bd_none = estimate(&llama_7b(), FinetuneMethod::Lora, OptimizerLib::None, QuantLevel::FourBit, 1);
-        let bd_unsloth = estimate(&llama_7b(), FinetuneMethod::Lora, OptimizerLib::Unsloth, QuantLevel::FourBit, 1);
+        let bd_none = estimate(
+            &llama_7b(),
+            FinetuneMethod::Lora,
+            OptimizerLib::None,
+            QuantLevel::FourBit,
+            1,
+        );
+        let bd_unsloth = estimate(
+            &llama_7b(),
+            FinetuneMethod::Lora,
+            OptimizerLib::Unsloth,
+            QuantLevel::FourBit,
+            1,
+        );
         let reduction = 1.0 - bd_unsloth.total_gib / bd_none.total_gib;
         assert!(
             (0.40..=0.60).contains(&reduction),
@@ -187,13 +229,28 @@ mod tests {
 
     #[test]
     fn library_savings_is_negative() {
-        let bd = estimate(&llama_7b(), FinetuneMethod::Lora, OptimizerLib::Unsloth, QuantLevel::FourBit, 1);
-        assert!(bd.library_savings_gib < 0.0, "savings should be expressed as a negative delta");
+        let bd = estimate(
+            &llama_7b(),
+            FinetuneMethod::Lora,
+            OptimizerLib::Unsloth,
+            QuantLevel::FourBit,
+            1,
+        );
+        assert!(
+            bd.library_savings_gib < 0.0,
+            "savings should be expressed as a negative delta"
+        );
     }
 
     #[test]
     fn total_equals_sum_of_components() {
-        let bd = estimate(&llama_7b(), FinetuneMethod::Full, OptimizerLib::None, QuantLevel::None, 1);
+        let bd = estimate(
+            &llama_7b(),
+            FinetuneMethod::Full,
+            OptimizerLib::None,
+            QuantLevel::None,
+            1,
+        );
         let computed = bd.weights_gib
             + bd.gradients_gib
             + bd.optimizer_gib
@@ -214,6 +271,10 @@ mod tests {
     #[test]
     fn fitting_tiers_all_for_tiny_requirement() {
         let tiers = fitting_tiers(1.0);
-        assert_eq!(tiers.len(), VRAM_TIERS.len(), "all tiers fit a 1 GiB requirement");
+        assert_eq!(
+            tiers.len(),
+            VRAM_TIERS.len(),
+            "all tiers fit a 1 GiB requirement"
+        );
     }
 }

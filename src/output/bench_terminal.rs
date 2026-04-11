@@ -68,7 +68,12 @@ pub fn render(report: &BenchReport) -> Result<()> {
         let marker = if is_recommended { ">" } else { " " };
 
         let (p50, p99, tput, mem) = if result.oom {
-            ("OOM".to_string(), "OOM".to_string(), "OOM".to_string(), "OOM".to_string())
+            (
+                "OOM".to_string(),
+                "OOM".to_string(),
+                "OOM".to_string(),
+                "OOM".to_string(),
+            )
         } else {
             (
                 format!("{:.1}ms", result.stats.p50_ms),

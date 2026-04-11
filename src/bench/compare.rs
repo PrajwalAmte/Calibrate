@@ -6,8 +6,16 @@ use crate::bench::{BenchReport, BenchResult};
 /// regressions (↑ latency, ↓ throughput, ↑ memory) relative to `baseline`.
 pub fn print_comparison(baseline: &BenchReport, current: &BenchReport) {
     println!("Benchmark comparison");
-    println!("  Baseline : {} ({})", baseline.model_path, baseline.ran_at.format("%Y-%m-%d"));
-    println!("  Current  : {} ({})", current.model_path, current.ran_at.format("%Y-%m-%d"));
+    println!(
+        "  Baseline : {} ({})",
+        baseline.model_path,
+        baseline.ran_at.format("%Y-%m-%d")
+    );
+    println!(
+        "  Current  : {} ({})",
+        current.model_path,
+        current.ran_at.format("%Y-%m-%d")
+    );
     println!();
 
     let header = format!(

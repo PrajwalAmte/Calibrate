@@ -136,7 +136,10 @@ mod tests {
             acc.record_micros(ms_to_us(20));
         }
         let stats = acc.finalize(100.0);
-        assert!(stats.cv < 0.01, "CV should be near zero for uniform samples");
+        assert!(
+            stats.cv < 0.01,
+            "CV should be near zero for uniform samples"
+        );
         assert!((stats.throughput_rps - 100.0).abs() < f64::EPSILON);
     }
 

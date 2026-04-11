@@ -39,8 +39,14 @@ mod tests {
                 gpu_model: "RTX 4090".to_string(),
                 vram_gib: 24.0,
                 hourly_usd: 0.44,
-                duration_range: Some(DurationRange { low_secs: 3600.0, high_secs: 5400.0 }),
-                cost_range: Some(CostRange { low_usd: 0.44, high_usd: 0.66 }),
+                duration_range: Some(DurationRange {
+                    low_secs: 3600.0,
+                    high_secs: 5400.0,
+                }),
+                cost_range: Some(CostRange {
+                    low_usd: 0.44,
+                    high_usd: 0.66,
+                }),
                 availability: AvailabilityStatus::Available,
                 flags: vec![],
             }],

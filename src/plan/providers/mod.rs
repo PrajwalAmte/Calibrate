@@ -40,9 +40,7 @@ pub async fn fetch_all(
     provider_filter: Option<&[String]>,
 ) -> (Vec<GpuListing>, Vec<SkippedProvider>) {
     let want = |name: &str| {
-        provider_filter.map_or(true, |f| {
-            f.iter().any(|p| p.eq_ignore_ascii_case(name))
-        })
+        provider_filter.map_or(true, |f| f.iter().any(|p| p.eq_ignore_ascii_case(name)))
     };
 
     let run_runpod = want("runpod");
@@ -52,13 +50,25 @@ pub async fn fetch_all(
     // Fire all three fetches concurrently; disabled providers return Ok([]).
     let (rp, lm, va) = tokio::join!(
         async {
-            if run_runpod { runpod::fetch_listings().await } else { Ok(vec![]) }
+            if run_runpod {
+                runpod::fetch_listings().await
+            } else {
+                Ok(vec![])
+            }
         },
         async {
-            if run_lambda { lambda::fetch_listings().await } else { Ok(vec![]) }
+            if run_lambda {
+                lambda::fetch_listings().await
+            } else {
+                Ok(vec![])
+            }
         },
         async {
-            if run_vastai { vastai::fetch_listings().await } else { Ok(vec![]) }
+            if run_vastai {
+                vastai::fetch_listings().await
+            } else {
+                Ok(vec![])
+            }
         },
     );
 

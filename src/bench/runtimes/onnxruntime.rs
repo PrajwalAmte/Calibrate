@@ -240,7 +240,11 @@ impl Runtime for OnnxRuntime {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("onnxruntime driver exited with {}: {}", output.status, stderr);
+            bail!(
+                "onnxruntime driver exited with {}: {}",
+                output.status,
+                stderr
+            );
         }
 
         let records = parse_driver_output(&output.stdout)?;

@@ -1,9 +1,9 @@
 #![allow(dead_code)] // types consumed in Phase 2–5
 
-pub mod model;
-pub mod vram;
-pub mod providers;
 pub mod duration;
+pub mod model;
+pub mod providers;
+pub mod vram;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -190,21 +190,30 @@ mod tests {
 
     #[test]
     fn duration_range_formats_minutes_below_one_hour() {
-        let dr = DurationRange { low_secs: 1200.0, high_secs: 2400.0 };
+        let dr = DurationRange {
+            low_secs: 1200.0,
+            high_secs: 2400.0,
+        };
         let s = dr.display();
         assert!(s.contains('m'), "expected minutes format, got: {s}");
     }
 
     #[test]
     fn duration_range_formats_hours_above_one_hour() {
-        let dr = DurationRange { low_secs: 5400.0, high_secs: 9000.0 };
+        let dr = DurationRange {
+            low_secs: 5400.0,
+            high_secs: 9000.0,
+        };
         let s = dr.display();
         assert!(s.contains('h'), "expected hours format, got: {s}");
     }
 
     #[test]
     fn cost_range_display_includes_dollar_sign() {
-        let cr = CostRange { low_usd: 0.46, high_usd: 0.70 };
+        let cr = CostRange {
+            low_usd: 0.46,
+            high_usd: 0.70,
+        };
         let s = cr.display();
         assert!(s.starts_with('$'), "got: {s}");
         assert!(s.contains("0.46"), "got: {s}");
@@ -221,7 +230,9 @@ mod tests {
 
     #[test]
     fn availability_status_queue_round_trips() {
-        let status = AvailabilityStatus::Queue { estimated_wait_minutes: 15 };
+        let status = AvailabilityStatus::Queue {
+            estimated_wait_minutes: 15,
+        };
         let json = serde_json::to_string(&status).unwrap();
         let back: AvailabilityStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(status, back);

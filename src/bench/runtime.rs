@@ -104,10 +104,7 @@ pub fn build_runtime_list(
         if !(descriptor.is_compatible)(format) {
             skipped.push(SkippedRuntime {
                 name: descriptor.name.to_string(),
-                reason: format!(
-                    "incompatible with {} model format",
-                    format.as_str()
-                ),
+                reason: format!("incompatible with {} model format", format.as_str()),
             });
             continue;
         }

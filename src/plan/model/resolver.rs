@@ -44,7 +44,10 @@ impl HfConfig {
     }
 
     fn hidden_size(&self) -> u32 {
-        self.hidden_size.or(self.n_embd).or(self.d_model).unwrap_or(4096)
+        self.hidden_size
+            .or(self.n_embd)
+            .or(self.d_model)
+            .unwrap_or(4096)
     }
 
     fn num_heads(&self) -> u32 {
@@ -187,7 +190,11 @@ mod tests {
     #[test]
     fn infer_spec_70b_gives_wide_arch() {
         let spec = infer_spec_from_params("test/70b", 70.0);
-        assert!(spec.num_layers >= 60, "expected deep model, got {}", spec.num_layers);
+        assert!(
+            spec.num_layers >= 60,
+            "expected deep model, got {}",
+            spec.num_layers
+        );
         assert!(spec.hidden_size >= 8192);
     }
 

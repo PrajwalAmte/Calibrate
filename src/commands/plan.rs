@@ -19,7 +19,13 @@ pub async fn run(args: PlanArgs) -> Result<()> {
         .with_context(|| format!("could not resolve model '{}'", args.model))?;
 
     // ── Step 2: Estimate VRAM ─────────────────────────────────────────────────
-    let breakdown = vram::estimate(&spec, args.method, args.optimizer, args.quantization, args.batch_size);
+    let breakdown = vram::estimate(
+        &spec,
+        args.method,
+        args.optimizer,
+        args.quantization,
+        args.batch_size,
+    );
     let required_vram_gib = breakdown.total_gib * 1.05; // 5% safety margin
     let fitting = vram::fitting_tiers(breakdown.total_gib);
     let workload = WorkloadSummary {
@@ -32,8 +38,7 @@ pub async fn run(args: PlanArgs) -> Result<()> {
 
     // ── Step 3: Fetch provider listings concurrently ─────────────────────────
     eprintln!("Fetching live GPU pricing...");
-    let (raw_listings, mut all_skipped) =
-        providers::fetch_all(args.providers.as_deref()).await;
+    let (raw_listings, mut all_skipped) = providers::fetch_all(args.providers.as_deref()).await;
 
     if raw_listings.is_empty() && !all_skipped.is_empty() {
         eprintln!("Warning: all providers failed to respond. Check your network connection.");
@@ -80,14 +85,16 @@ pub async fn run(args: PlanArgs) -> Result<()> {
     ranked.sort_by(|a, b| {
         let cost_a = sort_key(a);
         let cost_b = sort_key(b);
-        cost_a.partial_cmp(&cost_b).unwrap_or(std::cmp::Ordering::Equal)
+        cost_a
+            .partial_cmp(&cost_b)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // ── Step 6: Budget filter note (include in skipped if nothing fits) ───────
     if let Some(budget) = args.budget {
-        let affordable = ranked.iter().any(|l| {
-            l.cost_range.as_ref().map_or(true, |c| c.low_usd <= budget)
-        });
+        let affordable = ranked
+            .iter()
+            .any(|l| l.cost_range.as_ref().map_or(true, |c| c.low_usd <= budget));
         if !affordable && !ranked.is_empty() {
             let cheapest = ranked.first().unwrap();
             let over_by = cheapest
@@ -127,7 +134,10 @@ pub async fn run(args: PlanArgs) -> Result<()> {
 
 // ── Recommendation logic ───────────────────────────────────────────────────────
 
-fn build_recommendation(ranked: &[RankedListing], budget: Option<f64>) -> Option<PlanRecommendation> {
+fn build_recommendation(
+    ranked: &[RankedListing],
+    budget: Option<f64>,
+) -> Option<PlanRecommendation> {
     // Only consider listings that are immediately available for recommendation.
     let available: Vec<&RankedListing> = ranked
         .iter()
@@ -154,8 +164,7 @@ fn build_recommendation(ranked: &[RankedListing], budget: Option<f64>) -> Option
             .iter()
             .copied()
             .find(|l| {
-                !l.flags.contains(&ListingFlag::PriceVolatile)
-                    && sort_key(l) <= best_cost * 1.5
+                !l.flags.contains(&ListingFlag::PriceVolatile) && sort_key(l) <= best_cost * 1.5
             })
             .cloned()
     } else {
@@ -178,7 +187,9 @@ fn build_rationale(listing: &RankedListing, budget: Option<f64>) -> String {
         .map(|c| format!("an estimated total cost of {}", c.display()))
         .unwrap_or_else(|| format!("${:.2}/hr", listing.hourly_usd));
 
-    let over_budget = budget.zip(listing.cost_range.as_ref()).map_or(false, |(b, c)| c.low_usd > b);
+    let over_budget = budget
+        .zip(listing.cost_range.as_ref())
+        .map_or(false, |(b, c)| c.low_usd > b);
 
     let base = format!(
         "{} {} ({:.0} GiB VRAM) offers {} for this workload.",
@@ -195,7 +206,9 @@ fn build_rationale(listing: &RankedListing, budget: Option<f64>) -> String {
 /// Sort key: estimated low cost when available, otherwise hourly_usd × 24
 /// (one day of compute as a rough proxy for relative ordering).
 fn sort_key(l: &RankedListing) -> f64 {
-    l.cost_range.as_ref().map_or(l.hourly_usd * 24.0, |c| c.low_usd)
+    l.cost_range
+        .as_ref()
+        .map_or(l.hourly_usd * 24.0, |c| c.low_usd)
 }
 
 #[cfg(test)]
@@ -203,16 +216,33 @@ mod tests {
     use super::*;
     use crate::plan::{CostRange, DurationRange};
 
-    fn make_listing(provider: &str, gpu: &str, vram: f64, hourly: f64, cost_low: f64, volatile: bool) -> RankedListing {
+    fn make_listing(
+        provider: &str,
+        gpu: &str,
+        vram: f64,
+        hourly: f64,
+        cost_low: f64,
+        volatile: bool,
+    ) -> RankedListing {
         RankedListing {
             provider: provider.to_string(),
             gpu_model: gpu.to_string(),
             vram_gib: vram,
             hourly_usd: hourly,
-            duration_range: Some(DurationRange { low_secs: cost_low / hourly * 3600.0, high_secs: cost_low / hourly * 3600.0 * 1.5 }),
-            cost_range: Some(CostRange { low_usd: cost_low, high_usd: cost_low * 1.5 }),
+            duration_range: Some(DurationRange {
+                low_secs: cost_low / hourly * 3600.0,
+                high_secs: cost_low / hourly * 3600.0 * 1.5,
+            }),
+            cost_range: Some(CostRange {
+                low_usd: cost_low,
+                high_usd: cost_low * 1.5,
+            }),
             availability: AvailabilityStatus::Available,
-            flags: if volatile { vec![ListingFlag::PriceVolatile] } else { vec![] },
+            flags: if volatile {
+                vec![ListingFlag::PriceVolatile]
+            } else {
+                vec![]
+            },
         }
     }
 
@@ -234,7 +264,10 @@ mod tests {
             make_listing("RunPod", "RTX 4090", 24.0, 0.44, 0.48, false),
         ];
         let rec = build_recommendation(&ranked, None).unwrap();
-        assert!(rec.safe_alternative.is_some(), "should offer a stable alternative");
+        assert!(
+            rec.safe_alternative.is_some(),
+            "should offer a stable alternative"
+        );
         assert_eq!(rec.safe_alternative.unwrap().provider, "RunPod");
     }
 
@@ -258,9 +291,14 @@ mod tests {
         let mut unavail = make_listing("Lambda", "A100", 80.0, 0.50, 0.20, false);
         unavail.availability = AvailabilityStatus::Unavailable;
         unavail.flags.push(ListingFlag::CurrentlyUnavailable);
-        let ranked = vec![unavail, make_listing("RunPod", "RTX 4090", 24.0, 0.44, 0.48, false)];
+        let ranked = vec![
+            unavail,
+            make_listing("RunPod", "RTX 4090", 24.0, 0.44, 0.48, false),
+        ];
         let rec = build_recommendation(&ranked, None).unwrap();
-        assert_eq!(rec.listing.provider, "RunPod", "unavailable listing should not be recommended");
+        assert_eq!(
+            rec.listing.provider, "RunPod",
+            "unavailable listing should not be recommended"
+        );
     }
 }
-

@@ -38,7 +38,12 @@ pub fn render(report: &BenchReport) -> String {
             };
 
             let (p50, p99, tput, mem) = if r.oom {
-                ("OOM".to_string(), "OOM".to_string(), "OOM".to_string(), "OOM".to_string())
+                (
+                    "OOM".to_string(),
+                    "OOM".to_string(),
+                    "OOM".to_string(),
+                    "OOM".to_string(),
+                )
             } else {
                 (
                     format!("{:.1}ms", r.stats.p50_ms),

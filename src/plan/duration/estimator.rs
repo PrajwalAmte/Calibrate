@@ -88,7 +88,8 @@ mod tests {
 
     #[test]
     fn unknown_gpu_returns_none() {
-        let r = estimate_duration_range(&llama_7b(), "NonExistentGPU9999", Some(10_000), 8, 1, None);
+        let r =
+            estimate_duration_range(&llama_7b(), "NonExistentGPU9999", Some(10_000), 8, 1, None);
         assert!(r.is_none());
     }
 
@@ -102,30 +103,45 @@ mod tests {
 
     #[test]
     fn high_to_low_ratio_is_correct() {
-        let r = estimate_duration_range(&llama_7b(), "RTX 3090", Some(10_000), 8, 1, None)
-            .unwrap();
+        let r = estimate_duration_range(&llama_7b(), "RTX 3090", Some(10_000), 8, 1, None).unwrap();
         // high = 1.5 × point, low = 0.8 × point  →  ratio = 1.5 / 0.8 = 1.875
         let ratio = r.high_secs / r.low_secs;
-        assert!((ratio - 1.875).abs() < 0.001, "expected ratio 1.875, got {ratio}");
+        assert!(
+            (ratio - 1.875).abs() < 0.001,
+            "expected ratio 1.875, got {ratio}"
+        );
     }
 
     #[test]
     fn higher_mfu_gives_shorter_duration() {
-        let low = estimate_duration_range(&llama_7b(), "RTX 3090", Some(10_000), 8, 1, Some(0.20)).unwrap();
-        let high = estimate_duration_range(&llama_7b(), "RTX 3090", Some(10_000), 8, 1, Some(0.60)).unwrap();
-        assert!(high.low_secs < low.low_secs, "Higher MFU must produce shorter duration");
+        let low = estimate_duration_range(&llama_7b(), "RTX 3090", Some(10_000), 8, 1, Some(0.20))
+            .unwrap();
+        let high = estimate_duration_range(&llama_7b(), "RTX 3090", Some(10_000), 8, 1, Some(0.60))
+            .unwrap();
+        assert!(
+            high.low_secs < low.low_secs,
+            "Higher MFU must produce shorter duration"
+        );
     }
 
     #[test]
     fn more_epochs_scales_duration_linearly() {
-        let one = estimate_duration_range(&llama_7b(), "RTX 3090", Some(10_000), 8, 1, None).unwrap();
-        let three = estimate_duration_range(&llama_7b(), "RTX 3090", Some(10_000), 8, 3, None).unwrap();
-        assert!((three.low_secs / one.low_secs - 3.0).abs() < 0.001, "3 epochs should take 3× as long");
+        let one =
+            estimate_duration_range(&llama_7b(), "RTX 3090", Some(10_000), 8, 1, None).unwrap();
+        let three =
+            estimate_duration_range(&llama_7b(), "RTX 3090", Some(10_000), 8, 3, None).unwrap();
+        assert!(
+            (three.low_secs / one.low_secs - 3.0).abs() < 0.001,
+            "3 epochs should take 3× as long"
+        );
     }
 
     #[test]
     fn cost_range_one_hour_at_one_dollar() {
-        let dr = DurationRange { low_secs: 3600.0, high_secs: 7200.0 };
+        let dr = DurationRange {
+            low_secs: 3600.0,
+            high_secs: 7200.0,
+        };
         let cr = cost_range(&dr, 1.0);
         assert!((cr.low_usd - 1.0).abs() < 0.001);
         assert!((cr.high_usd - 2.0).abs() < 0.001);

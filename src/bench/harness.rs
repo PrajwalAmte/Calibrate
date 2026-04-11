@@ -135,8 +135,7 @@ pub fn run_runtime_benchmarks(
                     results.push(BenchResult {
                         runtime: runtime.name().to_string(),
                         batch_size,
-                        stats: crate::bench::stats::StatAccumulator::new()
-                            .finalize(0.0),
+                        stats: crate::bench::stats::StatAccumulator::new().finalize(0.0),
                         peak_memory_mib: 0.0,
                         memory_delta_mib: 0.0,
                         load_time_ms,
@@ -264,8 +263,7 @@ pub fn run_runtime_benchmarks(
                 Err(ref e) if is_oom_error(e) => {
                     warn!(
                         runtime = runtime.name(),
-                        batch_size,
-                        "OOM at measurement iteration {i}: {e}"
+                        batch_size, "OOM at measurement iteration {i}: {e}"
                     );
                     oom = true;
                     break;
@@ -370,11 +368,7 @@ fn run_warmup(runtime: &mut dyn Runtime, input: &BenchInput, warmup_count: u32) 
 ///
 /// This differs from `1 / mean_latency` because it captures scheduling
 /// overhead between requests under continuous load.
-fn measure_throughput(
-    runtime: &mut dyn Runtime,
-    input: &BenchInput,
-    window: Duration,
-) -> f64 {
+fn measure_throughput(runtime: &mut dyn Runtime, input: &BenchInput, window: Duration) -> f64 {
     let start = Instant::now();
     let mut count: u64 = 0;
     while start.elapsed() < window {

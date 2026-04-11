@@ -6,7 +6,10 @@ pub fn render(report: &PlanReport, budget: Option<f64>) {
 
     // ── Section 1: Workload analysis ─────────────────────────────────────────
     println!();
-    println!("  Model:     {}  ({:.2}B parameters)", w.model_id, w.param_count_b);
+    println!(
+        "  Model:     {}  ({:.2}B parameters)",
+        w.model_id, w.param_count_b
+    );
     println!("  Required:  {:.1} GiB VRAM", w.vram_breakdown.total_gib);
     if !w.fitting_tiers.is_empty() {
         println!("             fits {}  tiers", w.fitting_tiers.join(", "));
@@ -29,14 +32,22 @@ pub fn render(report: &PlanReport, budget: Option<f64>) {
             "(full fine-tune)"
         }
     );
-    println!("  {:25}  {:>7.2}", "Optimizer states", w.vram_breakdown.optimizer_gib);
-    println!("  {:25}  {:>7.2}  (gradient checkpointing)", "Activations", w.vram_breakdown.activations_gib);
-    println!("  {:25}  {:>7.2}", "KV cache", w.vram_breakdown.kv_cache_gib);
+    println!(
+        "  {:25}  {:>7.2}",
+        "Optimizer states", w.vram_breakdown.optimizer_gib
+    );
+    println!(
+        "  {:25}  {:>7.2}  (gradient checkpointing)",
+        "Activations", w.vram_breakdown.activations_gib
+    );
+    println!(
+        "  {:25}  {:>7.2}",
+        "KV cache", w.vram_breakdown.kv_cache_gib
+    );
     if w.vram_breakdown.library_savings_gib < 0.0 {
         println!(
             "  {:25}  {:>7.2}  (library savings)",
-            "Efficiency reduction",
-            w.vram_breakdown.library_savings_gib
+            "Efficiency reduction", w.vram_breakdown.library_savings_gib
         );
     }
     println!("  {}  {}", "-".repeat(25), "-".repeat(7));
@@ -45,7 +56,10 @@ pub fn render(report: &PlanReport, budget: Option<f64>) {
     // ── Section 2: Pricing table ──────────────────────────────────────────────
     if report.listings.is_empty() {
         println!();
-        println!("  No GPU listings found with ≥ {:.1} GiB VRAM.", w.required_vram_gib);
+        println!(
+            "  No GPU listings found with ≥ {:.1} GiB VRAM.",
+            w.required_vram_gib
+        );
     } else {
         let rec_key = report
             .recommendation
@@ -71,15 +85,31 @@ pub fn render(report: &PlanReport, budget: Option<f64>) {
             let marker = if is_rec { ">" } else { " " };
 
             let flags_str = format_flags(&l.flags, &l.availability);
-            if l.flags.contains(&ListingFlag::Spot) { any_spot = true; }
-            if l.flags.contains(&ListingFlag::PriceVolatile) { any_volatile = true; }
-            if l.availability == AvailabilityStatus::Unavailable { any_unavailable = true; }
+            if l.flags.contains(&ListingFlag::Spot) {
+                any_spot = true;
+            }
+            if l.flags.contains(&ListingFlag::PriceVolatile) {
+                any_volatile = true;
+            }
+            if l.availability == AvailabilityStatus::Unavailable {
+                any_unavailable = true;
+            }
 
-            let over = budget.zip(l.cost_range.as_ref()).map_or(false, |(b, c)| c.low_usd > b);
+            let over = budget
+                .zip(l.cost_range.as_ref())
+                .map_or(false, |(b, c)| c.low_usd > b);
 
             let vram_str = format!("{:.0}G", l.vram_gib);
-            let dur_str = l.duration_range.as_ref().map(|d| d.display()).unwrap_or_else(|| "n/a".to_string());
-            let cost_str = l.cost_range.as_ref().map(|c| c.display()).unwrap_or_else(|| "n/a".to_string());
+            let dur_str = l
+                .duration_range
+                .as_ref()
+                .map(|d| d.display())
+                .unwrap_or_else(|| "n/a".to_string());
+            let cost_str = l
+                .cost_range
+                .as_ref()
+                .map(|c| c.display())
+                .unwrap_or_else(|| "n/a".to_string());
             let budget_flag = if over { " !" } else { "" };
 
             println!(
@@ -97,16 +127,27 @@ pub fn render(report: &PlanReport, budget: Option<f64>) {
         }
 
         println!();
-        if any_spot        { println!("  * Spot/preemptible — may be interrupted mid-job."); }
-        if any_volatile    { println!("  ~ Price volatile   — Vast.ai market price; may change before launch."); }
-        if any_unavailable { println!("  ! Unavailable      — listed but no capacity right now."); }
-        if budget.is_some() { println!("  ! Over budget      — exceeds --budget limit."); }
+        if any_spot {
+            println!("  * Spot/preemptible — may be interrupted mid-job.");
+        }
+        if any_volatile {
+            println!("  ~ Price volatile   — Vast.ai market price; may change before launch.");
+        }
+        if any_unavailable {
+            println!("  ! Unavailable      — listed but no capacity right now.");
+        }
+        if budget.is_some() {
+            println!("  ! Over budget      — exceeds --budget limit.");
+        }
     }
 
     // ── Section 3: Recommendation ────────────────────────────────────────────
     println!();
     if let Some(rec) = &report.recommendation {
-        println!("  Recommendation: {} {} at ${:.2}/hr", rec.listing.provider, rec.listing.gpu_model, rec.listing.hourly_usd);
+        println!(
+            "  Recommendation: {} {} at ${:.2}/hr",
+            rec.listing.provider, rec.listing.gpu_model, rec.listing.hourly_usd
+        );
         println!("    {}", rec.rationale);
         if let Some(alt) = &rec.safe_alternative {
             println!();
@@ -119,7 +160,9 @@ pub fn render(report: &PlanReport, budget: Option<f64>) {
             }
         }
     } else {
-        println!("  No recommendation could be made (no available listings meet the requirements).");
+        println!(
+            "  No recommendation could be made (no available listings meet the requirements)."
+        );
     }
 
     // ── Skipped providers ─────────────────────────────────────────────────────
@@ -136,10 +179,18 @@ pub fn render(report: &PlanReport, budget: Option<f64>) {
 
 pub(crate) fn format_flags(flags: &[ListingFlag], availability: &AvailabilityStatus) -> String {
     let mut parts = vec![];
-    if flags.contains(&ListingFlag::Spot) { parts.push("*"); }
-    if flags.contains(&ListingFlag::PriceVolatile) { parts.push("~"); }
-    if flags.contains(&ListingFlag::LowReliability) { parts.push("low-rel"); }
-    if *availability == AvailabilityStatus::Unavailable { parts.push("unavail"); }
+    if flags.contains(&ListingFlag::Spot) {
+        parts.push("*");
+    }
+    if flags.contains(&ListingFlag::PriceVolatile) {
+        parts.push("~");
+    }
+    if flags.contains(&ListingFlag::LowReliability) {
+        parts.push("low-rel");
+    }
+    if *availability == AvailabilityStatus::Unavailable {
+        parts.push("unavail");
+    }
     parts.join(" ")
 }
 
@@ -180,7 +231,13 @@ mod tests {
         }
     }
 
-    fn make_listing(provider: &str, gpu: &str, vram: f64, hourly: f64, cost_low: f64) -> RankedListing {
+    fn make_listing(
+        provider: &str,
+        gpu: &str,
+        vram: f64,
+        hourly: f64,
+        cost_low: f64,
+    ) -> RankedListing {
         RankedListing {
             provider: provider.to_string(),
             gpu_model: gpu.to_string(),
@@ -269,19 +326,28 @@ mod tests {
 
     #[test]
     fn format_flags_spot() {
-        assert_eq!(format_flags(&[ListingFlag::Spot], &AvailabilityStatus::Available), "*");
+        assert_eq!(
+            format_flags(&[ListingFlag::Spot], &AvailabilityStatus::Available),
+            "*"
+        );
     }
 
     #[test]
     fn format_flags_volatile_and_unavailable() {
-        let s = format_flags(&[ListingFlag::PriceVolatile], &AvailabilityStatus::Unavailable);
+        let s = format_flags(
+            &[ListingFlag::PriceVolatile],
+            &AvailabilityStatus::Unavailable,
+        );
         assert!(s.contains('~'), "should contain volatile marker");
         assert!(s.contains("unavail"), "should contain unavail marker");
     }
 
     #[test]
     fn format_flags_low_reliability() {
-        let s = format_flags(&[ListingFlag::LowReliability], &AvailabilityStatus::Available);
+        let s = format_flags(
+            &[ListingFlag::LowReliability],
+            &AvailabilityStatus::Available,
+        );
         assert!(s.contains("low-rel"));
     }
 }

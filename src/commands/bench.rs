@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use tracing::info;
 
-use crate::bench::harness::{HarnessConfig, run_runtime_benchmarks};
+use crate::bench::harness::{run_runtime_benchmarks, HarnessConfig};
 use crate::bench::input::{BenchInput, ModelFormat};
 use crate::bench::runtime::build_runtime_list;
 use crate::bench::{BenchReport, Recommendation};
@@ -178,7 +178,14 @@ mod tests {
     use super::*;
     use crate::bench::{BenchResult, BenchStats};
 
-    fn make_result(runtime: &str, batch: u32, p99_ms: f64, tput: f64, mem_mib: f64, oom: bool) -> BenchResult {
+    fn make_result(
+        runtime: &str,
+        batch: u32,
+        p99_ms: f64,
+        tput: f64,
+        mem_mib: f64,
+        oom: bool,
+    ) -> BenchResult {
         BenchResult {
             runtime: runtime.to_string(),
             batch_size: batch,
