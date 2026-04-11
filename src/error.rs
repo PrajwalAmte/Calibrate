@@ -15,7 +15,14 @@ pub enum CalibrateError {
     #[error("insufficient permissions to read /proc/{pid}; try running with sudo")]
     PermissionDenied { pid: u32 },
 
-    #[error("NVML initialization failed: {0}\nIs the nvidia-smi driver installed?")]
+    #[error(
+        "NVML initialization failed: {0}\n\
+         \n\
+         To resolve this:\n\
+         • Run `nvidia-smi` — if it fails, the NVIDIA driver is not loaded\n\
+         • On Linux: check driver status with `sudo modprobe nvidia`\n\
+         • Ensure you have read access to /dev/nvidiactl (add user to `video` group)"
+    )]
     NvmlInit(String),
 
     #[error("NVML query error: {0}")]

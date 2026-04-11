@@ -1,4 +1,8 @@
+pub mod bench_markdown;
+pub mod bench_terminal;
 pub mod json;
+pub mod plan_json;
+pub mod plan_terminal;
 pub mod summary;
 pub mod terminal;
 

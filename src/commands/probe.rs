@@ -22,6 +22,12 @@ use crate::process::attach;
 /// live GPU process to confirm that RawSamples arrive with all fields
 /// (including `cpu_utilization`) populated.
 pub async fn run(args: ProbeArgs) -> anyhow::Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!(
+        "calibrate probe requires Linux with NVIDIA drivers installed.\n\
+         On macOS, `calibrate bench` and `calibrate plan` are available."
+    );
+
     // ── Probe NVML availability first ────────────────────────────────────
     NvmlCollector::probe().context(
         "NVML unavailable — is the NVIDIA driver installed and are you running as a user \

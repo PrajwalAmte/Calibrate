@@ -65,6 +65,15 @@ directories = "5"
 # Linux /proc parsing
 libc = "0.2"
 
+# Fixed random input generation for bench
+rand = { version = "0.8", features = ["small_rng"] }
+
+# Timestamps in BenchReport (comparison over time)
+chrono = { version = "0.4", features = ["serde"] }
+
+# Temporary files for subprocess driver scripts (bench)
+tempfile = "3"
+
 [dev-dependencies]
 proptest = "1"
 

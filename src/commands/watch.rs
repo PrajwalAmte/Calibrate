@@ -21,6 +21,12 @@ use crate::session::state::new_snapshot_channel;
 
 /// Entry point for `calibrate watch`.
 pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!(
+        "calibrate watch requires Linux with NVIDIA drivers installed.\n\
+         On macOS, `calibrate bench` and `calibrate plan` are available."
+    );
+
     let process_info = attach::attach(args.pid).context("Failed to attach to training process")?;
 
     // ── Container advisory — printed before the TUI takes over the screen ──

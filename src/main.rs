@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 
 mod analysis;
+mod bench;
 mod cli;
 mod collectors;
 mod commands;
@@ -9,6 +10,7 @@ mod error;
 mod gpu_specs;
 mod metrics;
 mod output;
+mod plan;
 mod process;
 mod session;
 
@@ -33,6 +35,12 @@ async fn main() -> Result<()> {
         }
         Commands::Probe(args) => {
             commands::probe::run(args).await?;
+        }
+        Commands::Bench(args) => {
+            commands::bench::run(args).await?;
+        }
+        Commands::Plan(args) => {
+            commands::plan::run(args).await?;
         }
     }
 
