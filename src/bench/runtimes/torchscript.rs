@@ -36,8 +36,14 @@ t0 = time.perf_counter()
 try:
     model = torch.jit.load(model_path, map_location="cpu")
     model.eval()
-    # Try GPU if available.
-    if torch.cuda.is_available():
+    # Prefer MPS on macOS, CUDA on Linux/Windows, fall back to CPU.
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        try:
+            model = model.to("mps")
+            device = "mps"
+        except Exception:
+            device = "cpu"
+    elif torch.cuda.is_available():
         try:
             model = model.cuda()
             device = "cuda"
@@ -68,12 +74,16 @@ except Exception:
 inp = torch.tensor(rng.random(shape, dtype=np.float32))
 if device == "cuda":
     inp = inp.cuda()
+elif device == "mps":
+    inp = inp.to("mps")
 
 def run_once():
     with torch.no_grad():
         model(inp)
     if device == "cuda":
         torch.cuda.synchronize()
+    elif device == "mps":
+        torch.mps.synchronize()
 
 # ── Warm-up ───────────────────────────────────────────────────────────────────
 for _ in range(warmup_iters):

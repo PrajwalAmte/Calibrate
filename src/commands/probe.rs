@@ -5,9 +5,12 @@ use std::time::Duration;
 use anyhow::Context;
 
 use crate::cli::ProbeArgs;
+#[cfg(target_os = "linux")]
 use crate::collectors::nvml::NvmlCollector;
+#[cfg(target_os = "linux")]
 use crate::collectors::proc::ProcCollector;
 use crate::collectors::MetricsCollector;
+#[cfg(target_os = "linux")]
 use crate::metrics::units::Percent;
 use crate::process::attach;
 
@@ -22,13 +25,14 @@ use crate::process::attach;
 /// live GPU process to confirm that RawSamples arrive with all fields
 /// (including `cpu_utilization`) populated.
 pub async fn run(args: ProbeArgs) -> anyhow::Result<()> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     anyhow::bail!(
-        "calibrate probe requires Linux with NVIDIA drivers installed.\n\
-         On macOS, `calibrate bench` and `calibrate plan` are available."
+        "calibrate probe requires Linux (NVIDIA) or macOS (Apple GPU).\n\
+         `calibrate bench` and `calibrate plan` are available on all platforms."
     );
 
-    // ── Probe NVML availability first─────
+    // ── GPU backend availability check ────────────────────────────────────
+    #[cfg(target_os = "linux")]
     NvmlCollector::probe().context(
         "NVML unavailable — is the NVIDIA driver installed and are you running as a user \
          with GPU access?",
@@ -53,31 +57,47 @@ pub async fn run(args: ProbeArgs) -> anyhow::Result<()> {
 
     // ── Set up shared state─────────────
     let stop = Arc::new(AtomicBool::new(false));
-    let shared_cpu: Arc<parking_lot::Mutex<Percent>> =
-        Arc::new(parking_lot::Mutex::new(Percent(0.0)));
 
-    // ProcCollector thread
-    std::thread::Builder::new()
-        .name("proc-collector".to_string())
-        .spawn({
-            let shared_cpu = shared_cpu.clone();
-            let stop = stop.clone();
-            let pid = args.pid;
-            move || ProcCollector::run_background(pid, shared_cpu, stop, interval)
-        })
-        .context("Failed to spawn ProcCollector thread")?;
-
-    // NvmlCollector thread
     let (tx, rx) = flume::bounded::<crate::collectors::RawSample>(64);
-    let nvml_collector = NvmlCollector::new(args.pid, interval, shared_cpu);
 
-    std::thread::Builder::new()
-        .name("nvml-collector".to_string())
-        .spawn({
-            let stop = stop.clone();
-            move || nvml_collector.run(tx, stop)
-        })
-        .context("Failed to spawn NVML collector thread")?;
+    // ── Spawn collector (platform-specific) ──────────────────────────────
+    #[cfg(target_os = "linux")]
+    {
+        let shared_cpu: Arc<parking_lot::Mutex<Percent>> =
+            Arc::new(parking_lot::Mutex::new(Percent(0.0)));
+
+        std::thread::Builder::new()
+            .name("proc-collector".to_string())
+            .spawn({
+                let shared_cpu = shared_cpu.clone();
+                let stop = stop.clone();
+                let pid = args.pid;
+                move || ProcCollector::run_background(pid, shared_cpu, stop, interval)
+            })
+            .context("Failed to spawn ProcCollector thread")?;
+
+        let nvml_collector = NvmlCollector::new(args.pid, interval, shared_cpu);
+        std::thread::Builder::new()
+            .name("nvml-collector".to_string())
+            .spawn({
+                let stop = stop.clone();
+                move || nvml_collector.run(tx, stop)
+            })
+            .context("Failed to spawn NVML collector thread")?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use crate::collectors::apple_gpu::AppleGpuCollector;
+        let collector = AppleGpuCollector::new(args.pid, interval);
+        std::thread::Builder::new()
+            .name("apple-gpu-collector".to_string())
+            .spawn({
+                let stop = stop.clone();
+                move || collector.run(tx, stop)
+            })
+            .context("Failed to spawn Apple GPU collector thread")?;
+    }
 
     // ── Collect N samples─────────────
     let mut received: u32 = 0;

@@ -68,12 +68,27 @@ impl PeakMemoryTracker {
     }
 }
 
-/// Read GPU VRAM usage via NVML for the given device index (MiB).
+/// Read GPU VRAM usage for the given device index (MiB).
+///
+/// On Linux: queries NVML for the specific device.
+/// On macOS: queries IOKit for system-wide GPU memory; `device_index` is ignored
+/// because Apple Silicon has a single unified GPU visible via IOKit.
+#[cfg(target_os = "linux")]
 fn read_vram_mib(device_index: u32) -> Result<f64> {
     let nvml = nvml_wrapper::Nvml::init()?;
     let device = nvml.device_by_index(device_index)?;
     let info = device.memory_info()?;
     Ok(info.used as f64 / (1024.0 * 1024.0))
+}
+
+#[cfg(target_os = "macos")]
+fn read_vram_mib(_device_index: u32) -> Result<f64> {
+    crate::collectors::apple_gpu::gpu_memory_used_mib()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn read_vram_mib(_device_index: u32) -> Result<f64> {
+    anyhow::bail!("GPU memory reading not supported on this platform")
 }
 
 /// Read the current process resident set size (MiB).

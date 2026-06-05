@@ -31,6 +31,18 @@ pub enum CalibrateError {
     #[error("NVML is not available on this system (non-NVIDIA GPU detected)")]
     NvmlUnavailable,
 
+    #[error(
+        "Apple GPU initialization failed: {0}\n\
+         \n\
+         To resolve this:\n\
+         • Ensure the process is running on macOS 12 or later\n\
+         • Verify IOKit access is not restricted by a sandbox profile"
+    )]
+    AppleGpuInit(String),
+
+    #[error("Apple GPU IOKit query failed: {0}")]
+    AppleGpuQuery(String),
+
     #[error("failed to read /proc/{pid}/stat: {source}")]
     ProcRead {
         pid: u32,

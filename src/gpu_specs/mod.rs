@@ -23,11 +23,12 @@ pub trait SpecsRepository: Send + Sync {
 
 // ── Name matching ────────────────────────────────────────────────────────────
 
-/// Normalise an NVML device name ready for matching against spec-DB keys.
+/// Normalise a GPU device name ready for matching against spec-DB keys.
 ///
 /// Strips vendor and product-line prefixes, replaces hyphens, and drops
-/// memory-size tokens so the remaining tokens can be matched against short
-/// canonical keys such as "RTX 3090" or "A100 SXM".
+/// memory-size tokens and generic suffixes so the remaining tokens can be
+/// matched against short canonical keys such as "RTX 3090", "A100 SXM",
+/// or "M3 Max".
 ///
 /// # Examples
 /// ```text
@@ -36,6 +37,8 @@ pub trait SpecsRepository: Send + Sync {
 /// "NVIDIA A100-PCIE-40GB"    →  "a100 pcie"
 /// "Tesla T4"                 →  "t4"
 /// "NVIDIA Tesla V100-SXM2-32GB" → "v100 sxm2"
+/// "Apple M3 Max GPU"         →  "m3 max"
+/// "Apple M1 Ultra GPU"       →  "m1 ultra"
 /// ```
 pub fn normalize_for_match(name: &str) -> String {
     let lower = name.to_lowercase();
@@ -44,10 +47,12 @@ pub fn normalize_for_match(name: &str) -> String {
     let s = lower.strip_prefix("nvidia ").unwrap_or(&lower);
     let s = s.strip_prefix("geforce ").unwrap_or(s);
     let s = s.strip_prefix("tesla ").unwrap_or(s);
-    // Normalise separators, then filter memory-size tokens like "80gb", "40gb".
+    // Apple GPU names produced by `apple_gpu_name()` look like "Apple M3 Max GPU".
+    let s = s.strip_prefix("apple ").unwrap_or(s);
+    // Normalise separators, then filter uninformative tokens.
     s.replace('-', " ")
         .split_whitespace()
-        .filter(|t| !is_memory_size_token(t))
+        .filter(|t| !is_memory_size_token(t) && !is_generic_suffix(t))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -100,6 +105,16 @@ pub fn find_best_match<'a>(specs: &'a [GpuSpec], query: &str) -> Option<&'a GpuS
 
 fn is_memory_size_token(token: &str) -> bool {
     token.ends_with("gb") && token[..token.len() - 2].parse::<u32>().is_ok()
+}
+
+/// Returns `true` for tokens that are generic suffixes carrying no
+/// discriminating information when matching GPU names.
+///
+/// "gpu" is appended by `process::attach::apple_gpu_name()` to distinguish
+/// the GPU name from the chip name (e.g. "Apple M3 Max GPU"), but the spec-DB
+/// keys for Apple Silicon are stored without that suffix ("M3 Max").
+fn is_generic_suffix(token: &str) -> bool {
+    token == "gpu"
 }
 
 // ── Production resolver ──────────────────────────────────────────────────────
@@ -266,5 +281,78 @@ mod tests {
         assert!(FallbackRepository
             .get_by_name("NVIDIA RTX Unknown 9999X")
             .is_none());
+    }
+
+    // ── Apple Silicon normalization and resolution ────────────────────────
+
+    #[test]
+    fn normalize_apple_silicon_strips_prefix_and_suffix() {
+        assert_eq!(normalize_for_match("Apple M3 Max GPU"), "m3 max");
+        assert_eq!(normalize_for_match("Apple M1 Ultra GPU"), "m1 ultra");
+        assert_eq!(normalize_for_match("Apple M2 Pro GPU"), "m2 pro");
+        assert_eq!(normalize_for_match("Apple M4 GPU"), "m4");
+        assert_eq!(normalize_for_match("Apple M1 GPU"), "m1");
+    }
+
+    #[test]
+    fn fallback_resolves_apple_m3_max() {
+        let spec = FallbackRepository
+            .get_by_name("Apple M3 Max GPU")
+            .unwrap();
+        assert_eq!(spec.name, "M3 Max");
+        assert!((spec.bf16_tflops - 28.4).abs() < 0.1, "got {}", spec.bf16_tflops);
+        assert_eq!(spec.vram_gib, 36);
+    }
+
+    #[test]
+    fn fallback_resolves_apple_m1() {
+        let spec = FallbackRepository.get_by_name("Apple M1 GPU").unwrap();
+        assert_eq!(spec.name, "M1");
+        assert!((spec.fp32_tflops - 2.6).abs() < 0.1);
+    }
+
+    #[test]
+    fn fallback_apple_m3_max_beats_m3_for_max_query() {
+        let max_spec = FallbackRepository
+            .get_by_name("Apple M3 Max GPU")
+            .unwrap();
+        let base_spec = FallbackRepository.get_by_name("Apple M3 GPU").unwrap();
+        assert_eq!(max_spec.name, "M3 Max", "got: {}", max_spec.name);
+        assert_eq!(base_spec.name, "M3", "got: {}", base_spec.name);
+        assert!(
+            max_spec.bf16_tflops > base_spec.bf16_tflops,
+            "M3 Max should have higher TFLOPS than M3"
+        );
+    }
+
+    #[test]
+    fn fallback_apple_m1_pro_not_matched_by_plain_m1() {
+        let spec = FallbackRepository.get_by_name("Apple M1 GPU").unwrap();
+        assert_eq!(spec.name, "M1", "plain M1 query must not return M1 Pro/Max");
+    }
+
+    #[test]
+    fn nvidia_spec_not_matched_by_apple_query() {
+        // Apple queries should never resolve to an NVIDIA spec.
+        let spec = FallbackRepository
+            .get_by_name("Apple M3 Max GPU")
+            .unwrap();
+        assert!(
+            !spec.name.contains("RTX") && !spec.name.contains("A100"),
+            "Apple query matched NVIDIA spec: {}",
+            spec.name
+        );
+    }
+
+    #[test]
+    fn apple_spec_not_matched_by_nvidia_query() {
+        let spec = FallbackRepository
+            .get_by_name("NVIDIA GeForce RTX 4090")
+            .unwrap();
+        assert!(
+            !spec.name.starts_with('M'),
+            "NVIDIA query matched Apple spec: {}",
+            spec.name
+        );
     }
 }

@@ -6,11 +6,15 @@ use anyhow::Context;
 use tracing::info;
 
 use crate::cli::{OutputFormat, WatchArgs};
+#[cfg(target_os = "linux")]
 use crate::collectors::cpu_only::CpuOnlyCollector;
+#[cfg(target_os = "linux")]
 use crate::collectors::nvml::NvmlCollector;
+#[cfg(target_os = "linux")]
 use crate::collectors::proc::ProcCollector;
 use crate::collectors::MetricsCollector;
 use crate::gpu_specs;
+#[cfg(target_os = "linux")]
 use crate::metrics::units::Percent;
 use crate::output::json::JsonRenderer;
 use crate::output::terminal::TerminalRenderer;
@@ -21,10 +25,10 @@ use crate::session::state::new_snapshot_channel;
 
 /// Entry point for `calibrate watch`.
 pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     anyhow::bail!(
-        "calibrate watch requires Linux with NVIDIA drivers installed.\n\
-         On macOS, `calibrate bench` and `calibrate plan` are available."
+        "calibrate watch requires Linux (NVIDIA) or macOS (Apple GPU).\n\
+         `calibrate bench` and `calibrate plan` are available on all platforms."
     );
 
     let process_info = attach::attach(args.pid).context("Failed to attach to training process")?;
@@ -50,7 +54,8 @@ pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
         _ => {}
     }
 
-    // ── NVML advisory ─────────────────────────────────────────────────────
+    // ── NVML advisory (Linux only) ───────────────────────────────────────────
+    #[cfg(target_os = "linux")]
     if !process_info.nvml_available {
         eprintln!(
             "[calibrate] Warning: NVML unavailable — GPU metrics disabled.\n\
@@ -58,7 +63,7 @@ pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
              • Confirm nvidia-smi is installed and the driver is loaded\n\
              • On non-NVIDIA hardware MFU cannot be computed"
         );
-    };
+    }
 
     info!(
         pid = args.pid,
@@ -77,48 +82,60 @@ pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
     // ── 3. Set up shared stop flag ────────────────────────────────────────
     let stop = Arc::new(AtomicBool::new(false));
 
-    // ── 4. Shared cpu_utilization written by ProcCollector, read by NvmlCollector ─
-    //
-    // Both threads share ownership of this `Mutex<Percent>`.  ProcCollector
-    // writes to it; NvmlCollector reads from it once per tick and stamps the
-    // value directly into each RawSample, eliminating the Percent(0.0) placeholder.
-    let shared_cpu: Arc<parking_lot::Mutex<Percent>> =
-        Arc::new(parking_lot::Mutex::new(Percent(0.0)));
-
-    // ── 5a. Spawn ProcCollector on its own OS thread ──────────────────────
     let interval = Duration::from_secs_f64(args.interval);
     let pid = args.pid;
 
-    std::thread::Builder::new()
-        .name("proc-collector".to_string())
-        .spawn({
-            let shared_cpu = shared_cpu.clone();
-            let stop = stop.clone();
-            move || ProcCollector::run_background(pid, shared_cpu, stop, interval)
-        })
-        .context("Failed to spawn ProcCollector thread")?;
-
     let (tx, rx) = flume::bounded::<crate::collectors::RawSample>(64);
 
-    if process_info.nvml_available {
-        let nvml_collector = NvmlCollector::new(pid, interval, shared_cpu);
+    // ── 4+5. Spawn collectors (platform-specific) ─────────────────────────
+    #[cfg(target_os = "linux")]
+    {
+        // Shared cpu% written by ProcCollector, read by NvmlCollector.
+        let shared_cpu: Arc<parking_lot::Mutex<Percent>> =
+            Arc::new(parking_lot::Mutex::new(Percent(0.0)));
+
         std::thread::Builder::new()
-            .name("nvml-collector".to_string())
+            .name("proc-collector".to_string())
+            .spawn({
+                let shared_cpu = shared_cpu.clone();
+                let stop = stop.clone();
+                move || ProcCollector::run_background(pid, shared_cpu, stop, interval)
+            })
+            .context("Failed to spawn ProcCollector thread")?;
+
+        if process_info.nvml_available {
+            let nvml_collector = NvmlCollector::new(pid, interval, shared_cpu);
+            std::thread::Builder::new()
+                .name("nvml-collector".to_string())
+                .spawn({
+                    let stop = stop.clone();
+                    move || nvml_collector.run(tx, stop)
+                })
+                .context("Failed to spawn NVML collector thread")?;
+        } else {
+            let cpu_collector = CpuOnlyCollector::new(pid, interval);
+            std::thread::Builder::new()
+                .name("cpu-only-collector".to_string())
+                .spawn({
+                    let stop = stop.clone();
+                    move || cpu_collector.run(tx, stop)
+                })
+                .context("Failed to spawn CPU-only collector thread")?;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use crate::collectors::apple_gpu::AppleGpuCollector;
+        let collector = AppleGpuCollector::new(pid, interval);
+        std::thread::Builder::new()
+            .name("apple-gpu-collector".to_string())
             .spawn({
                 let stop = stop.clone();
-                move || nvml_collector.run(tx, stop)
+                move || collector.run(tx, stop)
             })
-            .context("Failed to spawn NVML collector thread")?;
-    } else {
-        let cpu_collector = CpuOnlyCollector::new(pid, interval);
-        std::thread::Builder::new()
-            .name("cpu-only-collector".to_string())
-            .spawn({
-                let stop = stop.clone();
-                move || cpu_collector.run(tx, stop)
-            })
-            .context("Failed to spawn CPU-only collector thread")?;
-    };
+            .context("Failed to spawn Apple GPU collector thread")?;
+    }
 
     let (snap_tx, mut snap_rx) = new_snapshot_channel();
     let session = MonitoringSession::<state::Initializing>::new(

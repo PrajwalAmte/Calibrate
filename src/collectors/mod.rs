@@ -1,6 +1,11 @@
+#[cfg(target_os = "linux")]
 pub mod cpu_only;
+#[cfg(target_os = "linux")]
 pub mod nvml;
+#[cfg(target_os = "linux")]
 pub mod proc;
+#[cfg(target_os = "macos")]
+pub mod apple_gpu;
 
 use crate::metrics::units::{Celsius, Mhz, Mib, Percent, Watts};
 

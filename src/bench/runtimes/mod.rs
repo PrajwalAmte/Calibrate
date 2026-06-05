@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+pub mod metal;
 pub mod candle;
 pub mod llamacpp;
 pub mod onnxruntime;
@@ -12,11 +14,16 @@ use crate::bench::runtime::RuntimeDescriptor;
 /// at startup to build the list of runtimes that will actually run. The order
 /// here determines the display order in the output table.
 pub fn registry() -> Vec<RuntimeDescriptor> {
-    vec![
+    let mut runtimes = vec![
         candle::CandleRuntime::descriptor(),
         onnxruntime::OnnxRuntime::descriptor(),
         llamacpp::LlamaCppRuntime::descriptor(),
         torchscript::TorchScriptRuntime::descriptor(),
         tensorrt::TensorRtRuntime::descriptor(),
-    ]
+    ];
+
+    #[cfg(target_os = "macos")]
+    runtimes.insert(1, metal::MetalRuntime::descriptor());
+
+    runtimes
 }

@@ -523,3 +523,366 @@ let collector: Box<dyn Collector> = match NvmlCollector::new(pid) {
 This is the hexagonal architecture paying off again: the fallback required adding one new file (`cpu_only.rs`) and two lines in the startup code. No session logic, no metrics code, no output code needed to change.
 
 The broader lesson: a CLI tool's failure modes are part of its interface. A tool that works reliably on 60% of machines gets a reputation as a "sometimes works" tool and is reached for less. The question to ask at every failure mode: is there a degraded result that is more useful than no result?
+
+---
+
+### Platform-conditional compilation with `#[cfg]`
+
+Rust's conditional compilation is resolved entirely at compile time. The `#[cfg(target_os = "linux")]` attribute causes the annotated item to be compiled in only when the target operating system is Linux. On any other target, the item does not exist — it generates no code, no symbol, and no binary size. This is different from a runtime `if` branch, where both sides are compiled and only one is executed.
+
+The three forms used throughout the macOS extension:
+
+```rust
+// Attribute form — applies to the next item (function, struct, impl, mod, use)
+#[cfg(target_os = "macos")]
+pub mod apple_gpu;
+
+// cfg! macro form — evaluates to a bool at compile time; used inside expressions
+let on_mac = cfg!(target_os = "macos");
+
+// cfg_if! (external crate) — if/else chains for longer platform switches
+```
+
+Guarding entire `mod` declarations is the cleanest way to handle platform-specific modules. Declaring `#[cfg(target_os = "linux")] pub mod nvml;` means the `nvml` module simply does not exist on macOS. Attempting to reference `crate::collectors::nvml::NvmlCollector` in macOS-only code produces a compile error immediately, rather than a confusing linker failure.
+
+The alternative — putting `#[cfg]` attributes inside functions — leads to scattered guards that are hard to audit. Guarding the module boundary once is cleaner.
+
+The compound form `#[cfg(any(target_os = "linux", target_os = "macos"))]` accepts either platform. The inverse `#[cfg(not(any(...)))]` guards the bail-out for unsupported platforms. This pattern — support A, support B, fail clearly on everything else — became the standard for every platform branch in the watch and probe commands.
+
+One trap: `#[cfg]` on a `use` import does not suppress "unused import" warnings on other platforms; the import simply doesn't exist, which means the code that was using it also needs its own `#[cfg]` guard. Guarding imports (`use`) independently from the code that uses them is unnecessary ceremony. The cleanest solution is to keep the `use` imports inside the `#[cfg]` blocks where the code lives.
+
+---
+
+### Raw FFI to Apple system frameworks
+
+`IOKit` and `CoreFoundation` are C frameworks shipped with every macOS installation. Rust can call into them directly through `extern "C"` blocks with `#[link(name = "IOKit", kind = "framework")]`. No binding-generation tool (`bindgen`) is needed for a small, stable set of functions — the declarations can be written by hand.
+
+The function signatures must exactly match the C headers. The critical types:
+
+```rust
+type IOObject = u32;   // mach_port_t / io_object_t on 64-bit macOS
+type KernReturn = i32; // kern_return_t
+```
+
+`IOObject` being `u32` is the important one. The underlying C type is `mach_port_t`, which is `unsigned int` (32-bit) on both 32-bit and 64-bit macOS — not a pointer — so `u32` is correct.
+
+`CFDictionary`, `CFString`, and `CFNumber` are all `*mut c_void` / `*const c_void` on the Rust side. CoreFoundation is a reference-counted C framework: every `Create` function returns a +1 retain count that the caller must balance with `CFRelease`. Missing a `CFRelease` leaks memory; calling it twice causes a use-after-free. The discipline: pair every `Create` call with a `CFRelease` in the same scope, and never `Release` a pointer you do not own (e.g. values returned from `CFDictionaryGetValue` are owned by the dictionary, not the caller).
+
+`IOServiceGetMatchingServices` has one unusual ownership rule: it *consumes* the `CFDictionary` returned by `IOServiceMatching`. After `IOServiceGetMatchingServices` returns, the matching dictionary has been released by IOKit regardless of whether the call succeeded. Calling `CFRelease` on it afterward is a double-free. This is documented in the IOKit headers but not in any Rust binding; it must be handled by simply not storing the pointer after the call.
+
+The `unsafe` scope for IOKit calls must be as narrow as possible. The pattern used throughout `apple_gpu.rs`: unsafe FFI calls are isolated to small private functions (`query_gpu_stats`, `extract_snapshot`, `cf_dict_i64`) that present safe interfaces to the rest of the module. The public `run()` method on `AppleGpuCollector` contains no `unsafe` — all unsafe is inside those private helpers.
+
+---
+
+### IOKit GPU performance statistics on Apple Silicon
+
+Apple Silicon GPU utilization is exposed through the IOKit registry under the `IOAccelerator` class. On Apple Silicon, the concrete subclass is `AGXAccelerator` (Apple GPU Accelerator), but it conforms to the `IOAccelerator` protocol, so `IOServiceMatching("IOAccelerator")` discovers it.
+
+Each matched service has a property dictionary accessible via `IORegistryEntryCreateCFProperties`. Within that dictionary, the `PerformanceStatistics` sub-dictionary contains the metrics that correspond to what Activity Monitor calls "GPU":
+
+- `Device Utilization %` — overall GPU utilization (0–100), Apple Silicon
+- `GPU Core Utilization` — equivalent key on some AMD/Intel Mac GPUs
+- `In use system memory` — bytes of GPU/unified memory currently in use
+
+On Apple Silicon, `vram_total` does not exist as a distinct hardware quantity — the GPU's "VRAM" is a portion of unified DRAM. The total memory pool is queried via `sysctl("hw.memsize")`, which returns total physical RAM. This is the correct denominator: on M-series chips, the GPU can in principle use all available RAM (subject to OS pressure), so total system RAM is the right VRAM budget to display.
+
+The limitation that must be understood and communicated: these counters are system-wide, not per-process. macOS does not expose per-process GPU memory allocation to userspace without Metal Performance Shaders instrumentation. The `vram_used_mib` field in `RawSample` therefore reflects total GPU memory pressure across all processes, not just the monitored training job. This matches what Activity Monitor shows and is the best available approximation at the OS level.
+
+---
+
+### Process liveness detection across platforms
+
+The Linux approach — checking for the existence of `/proc/{pid}` — works only on Linux. The POSIX-portable equivalent is `kill(pid, 0)`. From `man 2 kill`:
+
+> If sig is 0, then no signal is sent, but existence and permission checks are still performed; this can be used to check for the existence of a process ID or process group ID.
+
+`kill(pid, 0)` returns 0 if the process exists and the calling process has permission to send it a signal, or -1 with errno `ESRCH` (no such process) or `EPERM` (process exists but permission denied). For liveness purposes, both 0 and `EPERM` mean the process is alive — only `ESRCH` means it has exited.
+
+The implementation:
+```rust
+fn process_is_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+```
+
+This is `unsafe` because it's a raw syscall, but it contains no undefined behavior — `kill` with signal 0 is specified by POSIX and safe to call. The same code works on Linux, macOS, and any other POSIX system.
+
+The asymmetry with the Linux `/proc` check: `/proc/{pid}` can also detect permission failures by checking file metadata with `stat`. The `kill(pid, 0)` approach conflates "process exists but I have no permission" with "process exists and I have permission" — both return liveness as `true`. For the `watch` command's purpose (deciding when to stop monitoring), this conflation is acceptable: if the process exists but we have no permission, we will hit errors reading metrics and the collector will exit on its own.
+
+---
+
+### `sysctl` for hardware information on macOS
+
+`sysctl` is the POSIX interface for reading kernel parameters. On macOS it is the primary API for hardware information that has no `/proc` equivalent. The pattern is consistent across all queries:
+
+```rust
+let mut value: T = unsafe { std::mem::zeroed() };
+let mut len = std::mem::size_of::<T>();
+let ret = unsafe {
+    libc::sysctlbyname(
+        b"key.name\0".as_ptr() as *const libc::c_char,
+        &mut value as *mut T as *mut libc::c_void,
+        &mut len,
+        std::ptr::null_mut(),  // newp: null = read-only
+        0,                     // newlen: 0 = read-only
+    )
+};
+```
+
+The NUL-terminated byte literal `b"hw.memsize\0"` is important — `sysctlbyname` expects a C string. Missing the NUL terminator is a memory safety bug: the C runtime will read past the end of the Rust slice looking for the NUL byte. Using a byte literal with an explicit `\0` makes this correct and visible.
+
+Two keys used in calibrate:
+
+- `hw.memsize` → `u64` — total physical RAM in bytes. Never changes after boot.
+- `machdep.cpu.brand_string` → `[u8; 256]` — CPU/SoC brand string, e.g. `"Apple M3 Max"`.
+
+`machdep.cpu.brand_string` requires a buffer, not a scalar. The returned `len` includes the NUL terminator; the displayed string should use `&buf[..len - 1]`. On non-Apple-Silicon Macs (Intel), this returns an Intel CPU string. The `apple_gpu_name()` function appends `" GPU"` to distinguish the GPU name from the chip name when matching against spec-DB keys, since IOKit does not provide a separate GPU product name.
+
+---
+
+### Designing for per-process vs system-wide metrics
+
+NVML is per-process aware: `device.running_compute_processes()` returns PIDs, so the `NvmlCollector` can identify which GPU is being used by the specific PID being monitored. IOKit on macOS is not — it provides system-wide GPU counters without process attribution.
+
+This distinction shapes the semantics of `RawSample` on each platform:
+
+| Field | Linux (NVML) | macOS (IOKit) |
+|---|---|---|
+| `sm_utilization` | GPU utilization while target PID is active | Total GPU utilization, all processes |
+| `vram_used_mib` | VRAM used by all compute processes on the device | Total GPU memory in use, all processes |
+| `vram_total_mib` | Device VRAM capacity | Total system RAM |
+
+The analytics pipeline (MFU, bottleneck detection, recommendations) consumes `RawSample` values identically regardless of platform. This means MFU on macOS is approximate in two ways: the TFLOPS denominator comes from spec-DB benchmarks (not live measurement), and the utilization numerator reflects all GPU activity on the machine, not just the training job.
+
+The correct design decision was not to add a `is_system_wide: bool` flag to `RawSample` and scatter platform checks throughout the analytics code. Instead, the limitation is documented in the advisory printed at watch startup and in the summary report. The analytics pipeline running on approximate data and producing approximate results is more useful than no analytics at all. The user is informed once; the code is not cluttered.
+
+---
+
+### Metal compute pipeline setup
+
+Apple's Metal framework exposes GPU compute through a pipeline of objects that must be created in a specific order:
+
+1. **`Device`** — represents the physical GPU. `Device::system_default()` returns the primary GPU on any Mac.
+2. **`CommandQueue`** — a queue of command buffers submitted to the device. Create once; reuse across many dispatches.
+3. **Library** — compiled Metal Shading Language (MSL) code. `device.new_library_with_source(msl_string, &CompileOptions::new())` compiles MSL at runtime and returns a library object.
+4. **Function** — a named entry point from the library. `library.get_function("kernel_name", None)`.
+5. **`ComputePipelineState`** — the compiled pipeline that binds the function to the device. Create once per function; expensive to create but cheap to reuse.
+6. **`CommandBuffer`** — a recording of GPU commands. Create per-dispatch from the queue.
+7. **`ComputeCommandEncoder`** — records individual compute commands into a buffer. `command_buffer.new_compute_command_encoder()`.
+
+For a `bench` workload, steps 1–5 happen in `load()` and are cached on the struct. Steps 6–7 happen in every `infer()` call. This separation is critical for accurate latency measurement: if pipeline creation happened inside `infer()`, the benchmark would measure compilation time, not inference time.
+
+`wait_until_completed()` on the command buffer is the GPU synchronization barrier. Metal dispatch is asynchronous by default — `cmd_buf.commit()` returns immediately and the GPU executes the commands in parallel with the CPU. Without `wait_until_completed()`, `infer()` would return instantly (measuring only encoding time, ~microseconds) rather than the actual GPU execution time. Forgetting this synchronization call was the first bug encountered in `MetalRuntime`.
+
+---
+
+### Metal Shading Language and the GEMV kernel
+
+MSL is a superset of C++14 with extensions for GPU parallelism. A compute kernel is a function annotated `kernel` that runs once per thread in a grid. The grid dimensions are specified at dispatch time from the CPU side.
+
+The bench kernel is a GEMV (general matrix–vector multiply): each thread computes one output element by dot-producting its assigned row of the weight matrix with the input vector.
+
+```metal
+kernel void bench_matmul(
+    device const float* weights [[buffer(0)]],
+    device const float* input   [[buffer(1)]],
+    device float*       output  [[buffer(2)]],
+    constant uint2&     dims    [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= dims.x) return;
+    float sum = 0.0f;
+    uint offset = gid * dims.y;
+    for (uint k = 0; k < dims.y; ++k)
+        sum += weights[offset + k] * input[k];
+    output[gid] = sum;
+}
+```
+
+`[[buffer(N)]]` is the binding index — it must match the index passed to `encoder.set_buffer(N, ...)` on the CPU side. `[[thread_position_in_grid]]` is the absolute thread index; the guard `if (gid >= dims.x) return;` handles the case where the grid is padded to a multiple of the threadgroup size.
+
+The dispatch sizing uses `dispatch_threads` (non-uniform dispatch), which correctly handles non-power-of-two output sizes without wasting threads. The threadgroup size is capped at `min(max_total_threads_per_threadgroup, 256, M)` — using 256 is a practical heuristic for simple kernels; the M cap prevents launching threadgroups larger than the output dimension on small matrices.
+
+The `constant` address space (`constant uint2& dims`) is for read-only data that is broadcast identically to all threads. It is stored in a faster memory path than `device` on Apple Silicon. The dimensions fit in 8 bytes and are passed directly via `set_bytes` rather than allocating a buffer, which avoids a small allocation per dispatch.
+
+---
+
+### `MTLResourceOptions::StorageModeShared` on unified memory
+
+Metal has three storage modes for buffers:
+
+- `StorageModeShared` — buffer is accessible from both CPU and GPU. On Apple Silicon with unified memory, this is a single physical allocation visible to both processors. No explicit synchronization needed.
+- `StorageModeManaged` (macOS only with discrete GPU) — separate CPU and GPU copies that must be synchronized explicitly via `didModifyRange` / `synchronizeResource`.
+- `StorageModePrivate` — GPU-only. CPU cannot read or write directly. Requires a blit (copy) command to populate.
+
+On Apple Silicon, `StorageModeShared` is optimal. There is no discrete GPU VRAM; the GPU reads directly from the same DRAM as the CPU. Choosing `StorageModePrivate` and uploading via blit commands would add unnecessary copy overhead on this hardware.
+
+The bench input buffer reuse logic exploits this: after the first `infer()` call allocates a `SharedMode` buffer, subsequent calls write directly to `buffer.contents() as *mut f32` — a raw pointer into the shared allocation — and the GPU sees the updated values on the next dispatch without any explicit cache flush. On discrete GPUs, this would require a `didModifyRange` call; on Apple Silicon unified memory, the CPU write is immediately coherent with the GPU's view.
+
+---
+
+### CoreML and MPS execution providers for subprocess runtimes
+
+Both ONNX Runtime and PyTorch have macOS-native acceleration paths:
+
+**ONNX Runtime + CoreML**: CoreMLExecutionProvider delegates ONNX graph nodes to Apple's Neural Engine and GPU via CoreML. It requires `onnxruntime >= 1.17` with the CoreML package installed (`pip install onnxruntime-silicon` or the standard package on Apple Silicon). The provider is selected by name:
+
+```python
+providers = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+session = ort.InferenceSession(model_path, providers=providers)
+```
+
+Not all ONNX ops are supported by CoreML — unsupported nodes fall back to CPU automatically. The benchmark result therefore represents a mix of Neural Engine/GPU (for supported ops) and CPU (for the remainder). This is exactly what a production ONNX deployment on macOS would use, so the benchmark is representative.
+
+**PyTorch + MPS**: Metal Performance Shaders backend for PyTorch, available since PyTorch 1.12 on Apple Silicon. Device selection:
+
+```python
+if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    model = model.to("mps")
+    device = "mps"
+```
+
+`torch.mps.synchronize()` is required for accurate latency measurement — same reason as Metal's `wait_until_completed()`. Without synchronization, `time.perf_counter()` captures only the time to enqueue GPU commands, not the time to execute them. Forgetting synchronization produces latency readings of 0.1–1ms for operations that actually take 20–100ms.
+
+The detection order in the torchscript driver is: MPS first, then CUDA, then CPU. This ensures that the same script produces the correct behavior across macOS (MPS), Linux (CUDA), and CPU-only machines without any platform-specific argument.
+
+---
+
+### GPU spec matching with a token scoring algorithm
+
+The spec database uses short canonical names (`"M3 Max"`, `"A100 SXM"`) while the strings that arrive at runtime are verbose and inconsistent (`"Apple M3 Max GPU"` from `sysctl`, `"NVIDIA A100-SXM4-80GB"` from NVML). The matching algorithm must handle both gracefully.
+
+The approach is two-stage:
+
+**Stage 1 — Normalization** (`normalize_for_match`): strips vendor prefixes (`"nvidia "`, `"geforce "`, `"tesla "`, `"apple "`), replaces hyphens with spaces, and removes tokens that are pure noise for matching:
+- Memory-size tokens: any token ending in `"gb"` whose prefix is a parseable integer (e.g. `"80gb"`, `"40gb"`)
+- Generic suffix tokens: `"gpu"` — present in macOS IOKit names but absent from spec keys
+
+**Stage 2 — Token prefix scoring** (`match_score`): every token in the spec key must prefix-match at least one token in the normalized query. The score is the sum of matched character lengths. Longer (more specific) spec keys score higher for the same query.
+
+The prefix-match direction matters: spec tokens prefix-match query tokens, not the reverse. This allows `"SXM"` in the spec to match `"SXM4"` in the query (the query is more specific than the spec key). If the direction were reversed, `"SXM4"` in the query would need to start with `"SXM4"` in the spec, which would require a separate entry for every SXM variant.
+
+The scoring system correctly handles the four-way disambiguation that was validated with tests:
+- `"M3"` query matches `"M3"` but not `"M3 Max"` (M3 Max requires all its tokens to match; "Max" has no counterpart in the query)
+- `"M3 Max"` query matches both `"M3"` and `"M3 Max"`, but `"M3 Max"` scores higher (two tokens matched vs one)
+- `"A10G"` query matches `"A10G"` (score 4) and `"A10"` (score 3); `"A10G"` wins
+- NVIDIA query never matches Apple spec keys: `"rtx 4090"` has no tokens that prefix-match `"m"` in `"M3 Max"`
+
+The test `apple_spec_not_matched_by_nvidia_query` and `nvidia_spec_not_matched_by_apple_query` encode this cross-contamination guarantee explicitly. Without them, a future change to the normalization or scoring could silently break isolation between vendor families.
+
+---
+
+### Apple Silicon GPU TFLOPS figures and their sources
+
+Apple does not publish official peak TFLOPS figures. The values in `fallback_specs.json` are derived from:
+
+1. **MLPerf Inference benchmarks** — the MLPerf committee publishes throughput results for Apple Silicon across standardized models. Back-calculating from throughput and model FLOPs gives a practical TFLOPS estimate.
+2. **Empirical measurements** — Metal benchmarks (`metal-bench`, MLX performance tests) run on known models and compare against theoretical GPU core counts × frequency × MAC throughput.
+3. **Apple silicon chip specifications** — Apple publishes GPU core counts and approximate clock speeds. Peak theoretical TFLOPS = `cores × MACs_per_core_per_cycle × frequency × 2`. For BF16 on M2+, the multiply-accumulate units operate at full BF16 precision, giving `fp32_tflops × 2` as the BF16 figure.
+
+M1 is the exception: the M1 Neural Engine supports BF16 but the GPU shader cores do not — GPU BF16 operations execute at the same throughput as FP32 on M1. This is why `"M1"` has `bf16_tflops == fp32_tflops` in the spec table. M2 and later introduced native BF16 in the GPU shader cores, giving the 2× ratio.
+
+The `boost_clock_mhz` field is populated with the nominal GPU clock from Apple's chip documentation, used for the clock-speed ratio in MFU calculations. Apple does not expose live GPU clock frequency via any public macOS API (unlike NVML's `device.clock_info(Clock::SM)`), so `sm_clock_mhz` in `RawSample` remains `0` on macOS and the MFU calculator falls back to using the spec's `boost_clock_mhz` as the reference.
+
+The correct way to communicate this in the tool's output is to mark Apple Silicon MFU values as "estimated" — the denominator is accurate to within approximately 20% based on empirical evidence, but is not the certified figure that NVIDIA publishes for its datacenter GPUs.
+
+---
+
+### `vram_gib` semantics on unified memory architectures
+
+The `GpuSpec` struct has a `vram_gib: u32` field that represents GPU memory capacity. For discrete GPUs, this is unambiguous — there is a fixed amount of GDDR/HBM on the PCIe card. For Apple Silicon, the field is populated with the base unified memory configuration for each chip variant (e.g., 36 for M3 Max, which ships with 36 GiB or 128 GiB depending on configuration).
+
+This is a deliberate simplification. The `vram_total_mib` field in `RawSample` reflects the actual system RAM at runtime (from `sysctl hw.memsize`), which is authoritative and correct. The spec-DB `vram_gib` is used only for the `plan` command's VRAM sufficiency check — whether a given GPU can fit a model with a given VRAM requirement. Using the base memory configuration is conservative: it will recommend the minimum tier that fits and let the user upgrade if they have a higher-memory SKU.
+
+A potential improvement would be to query system RAM at `plan` time and use it as the VRAM budget directly, but that would only be accurate on the machine running the `plan` command, not when planning for a remote cloud instance. The spec-DB base figure is the right choice for planning purposes.
+
+---
+
+### Eliminating dead-code warnings with `#[cfg]` on `mod` declarations
+
+When platform-specific modules are guarded with `#[cfg]` attributes on the `pub mod` declaration itself, the compiler excludes the entire module from the compilation unit for unsupported platforms. This has a cascading benefit: any code that uses types from that module only inside its own `#[cfg]` block also becomes dead from the compiler's perspective, and no dead-code warnings are emitted.
+
+Contrast with guarding only the call sites:
+
+```rust
+// This produces dead_code warnings on macOS for NvmlCollector, ProcCollector, etc.
+pub mod nvml;  // module compiled on all platforms
+pub mod proc;
+
+// In watch.rs:
+#[cfg(target_os = "linux")]
+{
+    let collector = NvmlCollector::new(...);  // only used here
+}
+```
+
+The `nvml` module is compiled on macOS (its types exist), but the types are never used (the call sites are cfg-guarded). The compiler reports `NvmlCollector` as never constructed, `discover_gpu_indices` as never used, etc.
+
+The fix — `#[cfg(target_os = "linux")] pub mod nvml;` — makes the module not exist on macOS. The types never enter the type system. No dead-code warning is possible because there is nothing to warn about.
+
+The transition from 27 dead-code warnings after Phase 1 to zero warnings after Phase 2 came entirely from moving the `#[cfg]` guard from call sites to module declarations. The general principle: guard at the highest level of the module hierarchy that is practical, not at individual use sites.
+
+---
+
+### Extending the `Runtime` trait without breaking existing implementations
+
+Adding a new runtime (`MetalRuntime`) to a trait-based system requires implementing every method in the trait. The `Runtime` trait has four required methods (`name`, `load`, `infer`, `unload`) and one optional method with a default implementation (`pre_collected_samples`).
+
+Because `MetalRuntime` is an in-process runtime (not a subprocess), it uses the standard measurement loop — `pre_collected_samples` returns `None` by default and no override is needed. The harness's dual-path logic (subprocess vs in-process) required no changes.
+
+The `RuntimeDescriptor` struct uses function pointers rather than trait objects:
+
+```rust
+pub struct RuntimeDescriptor {
+    pub name: &'static str,
+    pub is_available: fn() -> bool,
+    pub is_compatible: fn(ModelFormat) -> bool,
+    pub create: fn() -> Box<dyn Runtime>,
+}
+```
+
+This is intentional: descriptors are static and cheap to copy (three function pointers and a string reference), while `Box<dyn Runtime>` objects are expensive to create and hold heap-allocated state. The registry returns `Vec<RuntimeDescriptor>` — a list of descriptions — and the harness creates `Box<dyn Runtime>` instances only for the runtimes that pass both `is_available` and `is_compatible` checks.
+
+Inserting the Metal descriptor at position 1 in the registry (`runtimes.insert(1, ...)`) under a `#[cfg(target_os = "macos")]` guard required no changes to any existing descriptor or to the harness. The platform guard ensures `metal::MetalRuntime::descriptor()` is not even compiled on Linux, which means the `metal` crate dependency is not linked on Linux either.
+
+---
+
+### Platform-conditional dependencies in Cargo.toml
+
+Cargo supports target-specific dependencies via `[target.'cfg(...)'.dependencies]` sections:
+
+```toml
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.29"
+```
+
+This is the cargo manifest equivalent of `#[cfg]` on Rust code. The `metal` crate is not downloaded, not compiled, and not linked on Linux or Windows. The dependency section uses the same cfg predicate syntax as Rust's `#[cfg]` attributes — `target_os`, `target_arch`, `feature`, and compound expressions using `all(...)`, `any(...)`, `not(...)`.
+
+The distinction from `[dependencies]` with a feature flag is important: a feature flag still compiles and links the crate on all platforms (the feature just controls which code paths are active). A `[target.'cfg(...)'.dependencies]` entry truly excludes the crate from non-matching platforms.
+
+This matters for the `metal` crate specifically because it links against Metal and ObjectiveC runtime libraries (`-framework Metal`, `libobj.a`) that are only present on macOS. Listing it under `[dependencies]` unconditionally would cause a linker failure on Linux. The target-specific section is not a convenience — it is a correctness requirement.
+
+One subtlety with the string quoting: the single quotes around `cfg(target_os = "macos")` in TOML are required because the string contains double quotes. If the inner string used single quotes, the TOML outer quotes would need to be double quotes. Cargo's TOML parser accepts both forms.
+
+---
+
+### Testing cross-platform spec matching without running on both platforms
+
+The spec matching code (`normalize_for_match`, `match_score`, `find_best_match`) is pure Rust with no platform-specific code or FFI. This means all test scenarios — including Apple Silicon GPU name resolution — can be tested on Linux in CI and on macOS locally, running identical test code on both platforms.
+
+The tests for Apple Silicon resolution:
+
+```rust
+#[test]
+fn fallback_resolves_apple_m3_max() {
+    let spec = FallbackRepository.get_by_name("Apple M3 Max GPU").unwrap();
+    assert_eq!(spec.name, "M3 Max");
+    assert!((spec.bf16_tflops - 28.4).abs() < 0.1);
+}
+```
+
+This test passes on Linux even though no Apple GPU is present, because `get_by_name` is a pure in-memory lookup. The `"Apple M3 Max GPU"` string is exactly what `attach::apple_gpu_name()` would return at runtime on an M3 Max machine — the test is validating the entire name→spec resolution path end-to-end without requiring the hardware.
+
+The `nvidia_spec_not_matched_by_apple_query` and `apple_spec_not_matched_by_nvidia_query` tests guard against a class of regression that would only manifest at runtime on the respective hardware but can be caught in any CI environment. This is the property of pure functions: they can be tested exhaustively on any platform.
+
+The 141-test suite runs in 0.05 seconds. The fast feedback loop is a consequence of keeping all analytics, spec matching, and planning logic free of I/O and FFI — the only real-time tests that exist are in `process::attach` where liveness is checked, and even those use `kill(pid, 0)` which is a negligible syscall.

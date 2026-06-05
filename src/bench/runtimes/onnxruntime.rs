@@ -50,7 +50,11 @@ except ImportError as e:
 # ── Load ──────────────────────────────────────────────────────────────────────
 t0 = time.perf_counter()
 try:
-    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    import platform
+    if platform.system() == "Darwin":
+        providers = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    else:
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     sess_opts = ort.SessionOptions()
     sess_opts.log_severity_level = 3  # suppress verbose ONNX logs
     session = ort.InferenceSession(model_path, sess_options=sess_opts, providers=providers)

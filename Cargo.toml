@@ -74,6 +74,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Temporary files for subprocess driver scripts (bench)
 tempfile = "3"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.29"
+
 [dev-dependencies]
 proptest = "1"
 

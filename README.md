@@ -1,6 +1,6 @@
 # calibrate
 
-GPU training efficiency analyzer for NVIDIA workloads. Attach to a running training job and immediately see your Model FLOP Utilization (MFU), where compute time is being lost, and the single change that would fix it. Compare inference runtimes. Plan and cost out your next fine-tuning run against live cloud GPU pricing.
+GPU training efficiency analyzer for NVIDIA and Apple Silicon workloads. Attach to a running training job and immediately see your Model FLOP Utilization (MFU), where compute time is being lost, and the single change that would fix it. Compare inference runtimes. Plan and cost out your next fine-tuning run against live cloud GPU pricing.
 
 ```
 calibrate watch --pid 38291 --cost-per-hour 0.34
@@ -14,8 +14,8 @@ calibrate plan  --model meta-llama/Llama-3-8B --method lora --optimizer unsloth 
 
 | Command | Description |
 |---|---|
-| `watch` | Attach to a training process, measure MFU and bottlenecks in real time |
-| `bench` | Compare inference latency across runtime backends (Candle, ONNX, TorchScript, llama.cpp, TensorRT) |
+| `watch` | Attach to a training process, measure MFU and bottlenecks in real time (Linux/NVIDIA · macOS/Apple Silicon) |
+| `bench` | Compare inference latency across runtime backends (Candle, Metal, ONNX, TorchScript, llama.cpp, TensorRT) |
 | `plan`  | Fetch live GPU cloud prices and recommend the cheapest option for your fine-tuning workload |
 
 ---
@@ -24,30 +24,34 @@ calibrate plan  --model meta-llama/Llama-3-8B --method lora --optimizer unsloth 
 
 ```mermaid
 graph TD
-    CLI["CLI — clap\nwatch | bench | plan"]
+    CLI["CLI — clap<br/>watch | bench | plan"]
 
-    CLI --> CmdWatch["commands/watch.rs\norchestrate session lifecycle"]
-    CLI --> CmdBench["commands/bench.rs\nharness loop · Runtime trait"]
-    CLI --> CmdPlan["commands/plan.rs\nresolve → vram → providers → rank"]
+    CLI --> CmdWatch["commands/watch.rs<br/>orchestrate session lifecycle"]
+    CLI --> CmdBench["commands/bench.rs<br/>harness loop · Runtime trait"]
+    CLI --> CmdPlan["commands/plan.rs<br/>resolve → vram → providers → rank"]
 
-    CmdWatch --> Session["session/\nstate.rs · lifecycle.rs\ntypestate session machine"]
-    Session --> Collectors["collectors/\nnvml.rs — GPU via NVML\nproc.rs — CPU via /proc\ncpu_only.rs — no-GPU fallback"]
-    Collectors --> Metrics["metrics/\nmfu.rs · breakdown.rs\nwindow.rs · units.rs"]
-    Metrics --> Analysis["analysis/\nbottleneck.rs\nrecommendations.rs"]
+    CmdWatch --> Session["session/<br/>state.rs · lifecycle.rs<br/>typestate session machine"]
+    Session --> Collectors["collectors/<br/>nvml.rs — GPU via NVML  [Linux]<br/>proc.rs — CPU via /proc  [Linux]<br/>cpu_only.rs — no-GPU fallback  [Linux]<br/>apple_gpu.rs — GPU via IOKit  [macOS]"]
+    Collectors --> Metrics["metrics/<br/>mfu.rs · breakdown.rs<br/>window.rs · units.rs"]
+    Metrics --> Analysis["analysis/<br/>bottleneck.rs<br/>recommendations.rs"]
 
-    CmdBench --> BenchCore["bench/\nharness.rs · runtime.rs\nstats.rs · memory.rs\ncompare.rs"]
-    BenchCore --> Runtimes["bench/runtimes/\ncandle · onnxruntime\ntorchscript · llamacpp\ntensorrt"]
+    CmdBench --> BenchCore["bench/<br/>harness.rs · runtime.rs<br/>stats.rs · memory.rs<br/>compare.rs"]
+    BenchCore --> Runtimes["bench/runtimes/<br/>candle · metal [macOS]<br/>onnxruntime · torchscript<br/>llamacpp · tensorrt"]
 
-    CmdPlan --> PlanModel["plan/model/\nresolver.rs\nHF Hub + local config.json"]
-    CmdPlan --> PlanVram["plan/vram/\nestimator.rs\nweights + grads + optimizer\n+ activations + KV cache"]
-    CmdPlan --> PlanProviders["plan/providers/\nrunpod.rs · lambda.rs\nvastai.rs\ntokio::join! concurrent fetch"]
-    CmdPlan --> PlanDuration["plan/duration/\nestimator.rs\n6×params FLOP formula\nGPU TFLOPS lookup"]
+    CmdPlan --> PlanModel["plan/model/<br/>resolver.rs<br/>HF Hub + local config.json"]
+    CmdPlan --> PlanVram["plan/vram/<br/>estimator.rs<br/>weights + grads + optimizer<br/>+ activations + KV cache"]
+    CmdPlan --> PlanProviders["plan/providers/<br/>runpod.rs · lambda.rs<br/>vastai.rs<br/>tokio::join! concurrent fetch"]
+    CmdPlan --> PlanDuration["plan/duration/<br/>estimator.rs<br/>6×params FLOP formula<br/>GPU TFLOPS lookup"]
 
     Analysis --> Output
     BenchCore --> Output
     CmdPlan --> Output
 
-    Output["output/\nterminal.rs — live ratatui TUI\njson.rs — structured JSON\nsummary.rs — end-of-session\nbench_terminal.rs · bench_markdown.rs\nplan_terminal.rs · plan_json.rs"]
+    Output["output/<br/>terminal.rs — live ratatui TUI<br/>json.rs — structured JSON<br/>summary.rs — end-of-session<br/>bench_terminal.rs · bench_markdown.rs<br/>plan_terminal.rs · plan_json.rs"]
+
+    GpuSpecs["gpu_specs/<br/>fallback_specs.json<br/>45 GPUs: NVIDIA + Apple Silicon<br/>normalize_for_match · match_score"]
+    CmdWatch --> GpuSpecs
+    CmdPlan --> GpuSpecs
 ```
 
 ---
@@ -226,13 +230,15 @@ calibrate plan --model meta-llama/Llama-3-8B \
 
 | Subcommand | Platform | GPU requirement |
 |---|---|---|
-| `watch` | Linux only | NVIDIA GPU · drivers installed (`nvidia-smi` must work) |
+| `watch` | Linux or macOS | NVIDIA GPU (Linux) · Apple Silicon or AMD GPU (macOS) |
 | `bench` | Linux or macOS | None (CPU-only runtimes work without a GPU) |
 | `plan`  | Linux or macOS | None (fetches live cloud pricing over the internet) |
 
-On macOS, `calibrate watch` and `calibrate probe` exit immediately with a clear error. The `bench` and `plan` subcommands work fully on Apple Silicon and Intel Macs.
+On macOS, `calibrate watch` uses IOKit to read GPU utilization and unified memory from Apple Silicon (and AMD/Intel) GPUs. GPU metrics are system-wide rather than per-process — the same data Activity Monitor shows in its GPU column.
 
-For `watch`, the NVIDIA user-space library (`libcuda.so`, `libnvidia-ml.so`) must be present at runtime — it ships with the standard NVIDIA driver package. If `nvidia-smi` works, calibrate will work.
+On Linux, the NVIDIA user-space library (`libcuda.so`, `libnvidia-ml.so`) must be present at runtime — it ships with the standard NVIDIA driver package. If `nvidia-smi` works, calibrate will work.
+
+Windows is not supported.
 
 ---
 

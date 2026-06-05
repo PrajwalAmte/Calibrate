@@ -28,8 +28,8 @@ mod tests {
         let specs: Vec<crate::gpu_specs::GpuSpec> =
             serde_json::from_str(FALLBACK_DATA).expect("fallback_specs.json must be valid JSON");
         assert!(
-            specs.len() >= 25,
-            "expected at least 25 GPU specs, got {}",
+            specs.len() >= 40,
+            "expected at least 40 GPU specs, got {}",
             specs.len()
         );
     }
