@@ -14,6 +14,7 @@ use crate::bench::runtime::RuntimeDescriptor;
 /// at startup to build the list of runtimes that will actually run. The order
 /// here determines the display order in the output table.
 pub fn registry() -> Vec<RuntimeDescriptor> {
+    #[allow(unused_mut)]
     let mut runtimes = vec![
         candle::CandleRuntime::descriptor(),
         onnxruntime::OnnxRuntime::descriptor(),
