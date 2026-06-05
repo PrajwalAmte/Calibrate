@@ -123,8 +123,16 @@ impl MetalRuntime {
         let max_tpg = pipeline.max_total_threads_per_threadgroup();
         let tpg = max_tpg.min(256).min(m);
 
-        let threads_per_grid = MTLSize { width: m, height: 1, depth: 1 };
-        let threads_per_group = MTLSize { width: tpg, height: 1, depth: 1 };
+        let threads_per_grid = MTLSize {
+            width: m,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_group = MTLSize {
+            width: tpg,
+            height: 1,
+            depth: 1,
+        };
         encoder.dispatch_threads(threads_per_grid, threads_per_group);
         encoder.end_encoding();
     }
@@ -200,8 +208,14 @@ impl Runtime for MetalRuntime {
         let device = self.device.as_ref().context("MetalRuntime: not loaded")?;
         let queue = self.queue.as_ref().context("MetalRuntime: not loaded")?;
         let pipeline = self.pipeline.as_ref().context("MetalRuntime: not loaded")?;
-        let weight_buf = self.weight_buf.as_ref().context("MetalRuntime: not loaded")?;
-        let output_buf = self.output_buf.as_ref().context("MetalRuntime: not loaded")?;
+        let weight_buf = self
+            .weight_buf
+            .as_ref()
+            .context("MetalRuntime: not loaded")?;
+        let output_buf = self
+            .output_buf
+            .as_ref()
+            .context("MetalRuntime: not loaded")?;
 
         let k = self.dims[1] as usize;
 
@@ -238,7 +252,9 @@ impl Runtime for MetalRuntime {
         // Encode and dispatch.
         let cmd_buf = queue.new_command_buffer();
         let encoder = cmd_buf.new_compute_command_encoder();
-        Self::encode_dispatch(encoder, pipeline, weight_buf, input_buf, output_buf, self.dims);
+        Self::encode_dispatch(
+            encoder, pipeline, weight_buf, input_buf, output_buf, self.dims,
+        );
         cmd_buf.commit();
         cmd_buf.wait_until_completed();
 
@@ -274,7 +290,9 @@ fn parse_first_tensor_shape(header_json: &[u8]) -> Result<(u32, u32)> {
     let text = std::str::from_utf8(header_json)?;
     let value: serde_json::Value = serde_json::from_str(text)?;
 
-    let obj = value.as_object().context("SafeTensors header is not a JSON object")?;
+    let obj = value
+        .as_object()
+        .context("SafeTensors header is not a JSON object")?;
 
     for (key, entry) in obj.iter() {
         if key == "__metadata__" {

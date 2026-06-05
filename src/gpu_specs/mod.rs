@@ -296,11 +296,13 @@ mod tests {
 
     #[test]
     fn fallback_resolves_apple_m3_max() {
-        let spec = FallbackRepository
-            .get_by_name("Apple M3 Max GPU")
-            .unwrap();
+        let spec = FallbackRepository.get_by_name("Apple M3 Max GPU").unwrap();
         assert_eq!(spec.name, "M3 Max");
-        assert!((spec.bf16_tflops - 28.4).abs() < 0.1, "got {}", spec.bf16_tflops);
+        assert!(
+            (spec.bf16_tflops - 28.4).abs() < 0.1,
+            "got {}",
+            spec.bf16_tflops
+        );
         assert_eq!(spec.vram_gib, 36);
     }
 
@@ -313,9 +315,7 @@ mod tests {
 
     #[test]
     fn fallback_apple_m3_max_beats_m3_for_max_query() {
-        let max_spec = FallbackRepository
-            .get_by_name("Apple M3 Max GPU")
-            .unwrap();
+        let max_spec = FallbackRepository.get_by_name("Apple M3 Max GPU").unwrap();
         let base_spec = FallbackRepository.get_by_name("Apple M3 GPU").unwrap();
         assert_eq!(max_spec.name, "M3 Max", "got: {}", max_spec.name);
         assert_eq!(base_spec.name, "M3", "got: {}", base_spec.name);
@@ -334,9 +334,7 @@ mod tests {
     #[test]
     fn nvidia_spec_not_matched_by_apple_query() {
         // Apple queries should never resolve to an NVIDIA spec.
-        let spec = FallbackRepository
-            .get_by_name("Apple M3 Max GPU")
-            .unwrap();
+        let spec = FallbackRepository.get_by_name("Apple M3 Max GPU").unwrap();
         assert!(
             !spec.name.contains("RTX") && !spec.name.contains("A100"),
             "Apple query matched NVIDIA spec: {}",

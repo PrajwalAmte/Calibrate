@@ -51,11 +51,7 @@ extern "C" {
         c_str: *const c_char,
         encoding: u32,
     ) -> *mut c_void;
-    fn CFNumberGetValue(
-        number: *const c_void,
-        the_type: c_int,
-        value_ptr: *mut c_void,
-    ) -> bool;
+    fn CFNumberGetValue(number: *const c_void, the_type: c_int, value_ptr: *mut c_void) -> bool;
 }
 
 // ── CF helpers ────────────────────────────────────────────────────────────────
@@ -81,7 +77,11 @@ unsafe fn cf_dict_value(dict: *const c_void, key: &[u8]) -> Option<*const c_void
     }
     let value = CFDictionaryGetValue(dict, cf_key);
     CFRelease(cf_key);
-    if value.is_null() { None } else { Some(value) }
+    if value.is_null() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 /// Extract an `i64` from a `CFDictionary` entry that holds a `CFNumber`.
@@ -97,7 +97,11 @@ unsafe fn cf_dict_i64(dict: *const c_void, key: &[u8]) -> Option<i64> {
         CF_NUMBER_SINT64_TYPE,
         &mut result as *mut i64 as *mut c_void,
     );
-    if ok { Some(result) } else { None }
+    if ok {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 // ── GPU snapshot ──────────────────────────────────────────────────────────────
@@ -140,12 +144,8 @@ fn query_gpu_stats() -> Result<Vec<GpuSnapshot>, CalibrateError> {
             }
 
             let mut props: *mut c_void = std::ptr::null_mut();
-            let kr = IORegistryEntryCreateCFProperties(
-                service,
-                &mut props,
-                std::ptr::null_mut(),
-                0,
-            );
+            let kr =
+                IORegistryEntryCreateCFProperties(service, &mut props, std::ptr::null_mut(), 0);
             IOObjectRelease(service);
 
             if kr != KERN_SUCCESS || props.is_null() {
@@ -212,7 +212,11 @@ fn total_memory_bytes() -> u64 {
             0,
         )
     };
-    if ret == 0 { size } else { 0 }
+    if ret == 0 {
+        size
+    } else {
+        0
+    }
 }
 
 // ── Process liveness ──────────────────────────────────────────────────────────
@@ -341,8 +345,8 @@ impl MetricsCollector for AppleGpuCollector {
 /// NVML's per-device VRAM usage query.  On Apple Silicon unified memory, this
 /// reflects the GPU memory pressure of all running processes.
 pub fn gpu_memory_used_mib() -> anyhow::Result<f64> {
-    let snapshots = query_gpu_stats()
-        .map_err(|e| anyhow::anyhow!("IOKit GPU memory query failed: {e}"))?;
+    let snapshots =
+        query_gpu_stats().map_err(|e| anyhow::anyhow!("IOKit GPU memory query failed: {e}"))?;
     let total_bytes: u64 = snapshots.iter().map(|s| s.memory_used_bytes).sum();
     Ok(total_bytes as f64 / (1024.0 * 1024.0))
 }

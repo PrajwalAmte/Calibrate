@@ -1,7 +1,7 @@
-#[cfg(target_os = "macos")]
-pub mod metal;
 pub mod candle;
 pub mod llamacpp;
+#[cfg(target_os = "macos")]
+pub mod metal;
 pub mod onnxruntime;
 pub mod tensorrt;
 pub mod torchscript;
