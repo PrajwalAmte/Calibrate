@@ -3,6 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+    tags:
+      - 'v*'
   pull_request:
     branches: [main]
 
@@ -15,7 +17,7 @@ jobs:
     name: Build, Lint & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -50,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: check
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -99,13 +101,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: check
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Release build
         run: cargo build --release
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: calibrate-linux-x86_64
           path: target/release/calibrate
@@ -118,10 +120,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Download Linux binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.3.0
         with:
           name: calibrate-linux-x86_64
           path: dist/
@@ -130,14 +132,14 @@ jobs:
         run: mv dist/calibrate dist/calibrate-linux-x86_64
 
       - name: Build macOS binary
-        uses: actions/github-script@v7
+        uses: actions/github-script@v7.0.1
         # macOS binary is built locally — skip in CI for now; users can build from source.
         # Remove this step and add a macos runner if you want pre-built macOS binaries.
         with:
           script: core.info('macOS binary not built in CI — users build from source or install via cargo')
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.3.2
         with:
           name: "calibrate ${{ github.ref_name }}"
           body: |
