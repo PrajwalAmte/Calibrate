@@ -61,14 +61,14 @@ graph TD
 
 ## Install
 
-**Pre-built binary — no Rust required**
+**Pre-built binary (Linux x86-64) — no Rust required**
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/PrajwalAmte/Calibrate/releases/latest/download/calibrate-installer.sh | sh
+curl -LsSf https://github.com/PrajwalAmte/Calibrate/releases/latest/download/calibrate-linux-x86_64 \
+  -o calibrate && chmod +x calibrate && sudo mv calibrate /usr/local/bin/
 ```
 
-Or download a tarball directly from the [releases page](https://github.com/PrajwalAmte/Calibrate/releases) and place the binary anywhere on your `$PATH`.
+Or download directly from the [releases page](https://github.com/PrajwalAmte/Calibrate/releases).
 
 **With Cargo (requires Rust 1.75+)**
 
