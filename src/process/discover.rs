@@ -1,5 +1,3 @@
-use std::process::Command;
-
 use regex::Regex;
 
 /// A running process that looks like a training job.
@@ -187,6 +185,7 @@ fn all_processes() -> Vec<TrainingProcess> {
 
     #[cfg(target_os = "macos")]
     {
+        use std::process::Command;
         if let Ok(out) = Command::new("ps").args(["-eo", "pid,command"]).output() {
             let stdout = String::from_utf8_lossy(&out.stdout);
             for line in stdout.lines().skip(1) {

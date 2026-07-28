@@ -2,7 +2,7 @@
 name = "calibrate"
 version = "0.1.0"
 edition = "2021"
-authors = ["Prajwal Amte <prajwalamte@github.com>"]
+authors = ["Prajwal Amte <prajwalamte@gmail.com>"]
 description = "GPU training efficiency analyzer — real-time MFU, bottleneck detection, and actionable recommendations for NVIDIA GPU workloads"
 license = "MIT"
 repository = "https://github.com/PrajwalAmte/Calibrate"

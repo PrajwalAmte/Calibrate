@@ -388,6 +388,7 @@ fn check_proc_visibility() -> Vec<Status> {
     let exists = {
         #[cfg(target_os = "linux")]
         {
+            use std::path::Path;
             Path::new(&format!("/proc/{own_pid}")).exists()
         }
         #[cfg(not(target_os = "linux"))]
