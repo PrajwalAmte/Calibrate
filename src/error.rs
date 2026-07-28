@@ -6,29 +6,67 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[allow(dead_code)]
 pub enum CalibrateError {
-    #[error("process {pid} not found — is the training job still running?")]
+    #[error(
+        "process {pid} not found — is the training job still running?\n\
+         \n\
+         To find the correct PID:\n\
+           pgrep -f train.py          # by script name\n\
+           pgrep -a -f torch          # all torch processes\n\
+           calibrate diagnose         # auto-detect active training processes"
+    )]
     ProcessNotFound { pid: u32 },
 
-    #[error("process {pid} is not using any NVIDIA GPU")]
+    #[error(
+        "process {pid} is not using any NVIDIA GPU.\n\
+         \n\
+         Possible causes:\n\
+         • Training is running on CPU — check your script for device='cpu'\n\
+         • GPU allocation happened after you ran calibrate watch — try attaching again\n\
+         • The process uses a non-NVIDIA GPU (AMD/Intel) — NVML cannot see it"
+    )]
     NoGpuProcess { pid: u32 },
 
-    #[error("insufficient permissions to read /proc/{pid}; try running with sudo")]
+    #[error(
+        "insufficient permissions to read /proc/{pid}\n\
+         \n\
+         To fix:\n\
+           sudo calibrate watch --pid {pid}\n\
+           Or add yourself to the process owner's group if running across users"
+    )]
     PermissionDenied { pid: u32 },
 
     #[error(
         "NVML initialization failed: {0}\n\
          \n\
-         To resolve this:\n\
-         • Run `nvidia-smi` — if it fails, the NVIDIA driver is not loaded\n\
-         • On Linux: check driver status with `sudo modprobe nvidia`\n\
-         • Ensure you have read access to /dev/nvidiactl (add user to `video` group)"
+         Possible causes and fixes:\n\
+         \n\
+         1. Driver not loaded:\n\
+            sudo modprobe nvidia\n\
+         \n\
+         2. libnvidia-ml library missing:\n\
+            Ubuntu/Debian: sudo apt-get install libnvidia-ml1\n\
+            RHEL/CentOS:   sudo dnf install nvidia-driver-cuda-libs\n\
+            Then reload:   sudo ldconfig\n\
+         \n\
+         3. Permission denied on /dev/nvidiactl:\n\
+            sudo usermod -aG video $USER && newgrp video\n\
+         \n\
+         4. Docker without GPU passthrough:\n\
+            Use: docker run --gpus all ... (requires nvidia-container-toolkit)\n\
+         \n\
+         Run `calibrate diagnose` for a detailed per-component report."
     )]
     NvmlInit(String),
 
-    #[error("NVML query error: {0}")]
+    #[error("NVML query error: {0}\n  Run `calibrate diagnose` to verify the driver stack.")]
     NvmlQuery(String),
 
-    #[error("NVML is not available on this system (non-NVIDIA GPU detected)")]
+    #[error(
+        "NVML is not available on this system.\n\
+         \n\
+         If you have an NVIDIA GPU, run `calibrate diagnose` to find the missing component.\n\
+         If this is a non-NVIDIA system, `calibrate watch` requires Apple Silicon (macOS) or NVIDIA (Linux)."
+    )]
     NvmlUnavailable,
 
     #[error(

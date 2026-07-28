@@ -301,7 +301,7 @@ impl MonitoringSession<state::Done> {
     }
 }
 
-// ── Integration tests──────────
+//  Integration tests
 
 #[cfg(test)]
 mod tests {

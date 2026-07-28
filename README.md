@@ -4,6 +4,8 @@ GPU training efficiency analyzer for NVIDIA and Apple Silicon workloads. Attach 
 
 ```
 calibrate watch --pid 38291 --cost-per-hour 0.34
+calibrate watch --process-name "train\.py"
+calibrate watch --auto
 calibrate bench --model ./model.safetensors --batch-size 8
 calibrate plan  --model meta-llama/Llama-3-8B --method lora --optimizer unsloth --dataset-rows 50000
 ```
@@ -14,6 +16,7 @@ calibrate plan  --model meta-llama/Llama-3-8B --method lora --optimizer unsloth 
 
 | Command | Description |
 |---|---|
+| `diagnose` | Check NVIDIA/Apple GPU driver stack and print actionable fix instructions |
 | `watch` | Attach to a training process, measure MFU and bottlenecks in real time (Linux/NVIDIA · macOS/Apple Silicon) |
 | `bench` | Compare inference latency across runtime backends (Candle, Metal, ONNX, TorchScript, llama.cpp, TensorRT) |
 | `plan`  | Fetch live GPU cloud prices and recommend the cheapest option for your fine-tuning workload |
@@ -87,14 +90,40 @@ cargo build --release
 ## Usage: calibrate watch
 
 ```
-calibrate watch --pid <PID> [OPTIONS]
+calibrate watch --pid <PID>             [OPTIONS]
+calibrate watch --process-name <REGEX>  [OPTIONS]
+calibrate watch --auto                  [OPTIONS]
+
+Target (exactly one required):
+  -p, --pid <PID>               Attach to a known process ID
+  -n, --process-name <PATTERN>  Attach by regex match on the command line
+  -a, --auto                    Auto-discover training processes; pick interactively if >1
 
 Options:
-  -p, --pid <PID>               Process ID of the running training job
   -c, --cost-per-hour <USD/HR>  Hourly GPU cost (enables dollar waste display)
   -i, --interval <SECS>         Sampling interval [default: 2]
   -o, --output <FORMAT>         terminal | json  [default: terminal]
   -h, --help                    Print help
+```
+
+**Finding a process without knowing its PID**
+
+```bash
+# Let calibrate find and list all active training jobs:
+calibrate watch --auto
+
+# Or match by script name (supports full regex):
+calibrate watch --process-name "train\.py"
+calibrate watch --process-name "minerva|chess"
+
+# Multiple matches → calibrate lists them and exits:
+#   [ 1]  PID  31760  python3 training/train.py --data ...
+#   [ 2]  PID  31891  python3 training/train_v2.py --data ...
+#   Enter number [1-2]:
+#
+# Single match → attaches immediately with a confirmation line:
+#   [calibrate] Auto-detected training process:
+#     PID  31760  python3 training/train.py --data ...
 ```
 
 **Example output**

@@ -21,7 +21,7 @@ pub trait SpecsRepository: Send + Sync {
     fn get_by_name(&self, name: &str) -> Option<GpuSpec>;
 }
 
-// ── Name matching ────────────────────────────────────────────────────────────
+//  Name matching
 
 /// Normalise a GPU device name ready for matching against spec-DB keys.
 ///
@@ -117,7 +117,7 @@ fn is_generic_suffix(token: &str) -> bool {
     token == "gpu"
 }
 
-// ── Production resolver ──────────────────────────────────────────────────────
+//  Production resolver
 
 /// Resolve a spec using the remote → cache → baked-in fallback chain.
 ///
@@ -140,14 +140,14 @@ pub fn resolve(name: &str) -> GpuSpec {
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
+//  Tests
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::gpu_specs::fallback::FallbackRepository;
 
-    // ── normalize_for_match ──────────────────────────────────────────────
+    //  normalize_for_match
 
     #[test]
     fn normalize_geforce_prefix() {
@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(normalize_for_match("NVIDIA H100 PCIe"), "h100 pcie");
     }
 
-    // ── match_score ──────────────────────────────────────────────────────
+    //  match_score
 
     #[test]
     fn match_score_exact() {
@@ -218,7 +218,7 @@ mod tests {
         );
     }
 
-    // ── find_best_match / FallbackRepository integration ─────────────────
+    //  find_best_match / FallbackRepository integration ─
 
     #[test]
     fn fallback_resolves_geforce_rtx_3090() {
@@ -283,7 +283,7 @@ mod tests {
             .is_none());
     }
 
-    // ── Apple Silicon normalization and resolution ────────────────────────
+    //  Apple Silicon normalization and resolution
 
     #[test]
     fn normalize_apple_silicon_strips_prefix_and_suffix() {

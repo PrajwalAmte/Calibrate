@@ -20,6 +20,7 @@ use crate::output::json::JsonRenderer;
 use crate::output::terminal::TerminalRenderer;
 use crate::output::OutputRenderer;
 use crate::process::attach::{self, ContainerContext};
+use crate::process::discover;
 use crate::session::lifecycle::{state, MonitoringSession};
 use crate::session::state::new_snapshot_channel;
 
@@ -31,16 +32,23 @@ pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
          `calibrate bench` and `calibrate plan` are available on all platforms."
     );
 
-    let process_info = attach::attach(args.pid).context("Failed to attach to training process")?;
+    let pid = tokio::task::spawn_blocking(move || {
+        discover::resolve_pid(args.pid, args.process_name.as_deref(), args.auto)
+    })
+    .await
+    .context("process discovery panicked")?
+    .context("Failed to resolve target process")?;
 
-    // ── Container advisory — printed before the TUI takes over the screen ──
+    let process_info = attach::attach(pid).context("Failed to attach to training process")?;
+
+    //  Container advisory — printed before the TUI takes over the screen
     match &process_info.container_context {
         ContainerContext::Docker => {
             eprintln!(
                 "[calibrate] Note: running inside a Docker container. \
                  If the training process is on the host, run calibrate there instead:\n  \
                  docker exec -it <container> calibrate watch --pid {}",
-                args.pid
+                pid
             );
         }
         ContainerContext::Kubernetes => {
@@ -48,13 +56,13 @@ pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
                 "[calibrate] Note: running inside a Kubernetes pod. \
                  If the training process is on the host node, use:\n  \
                  kubectl exec -it <pod> -- calibrate watch --pid {}",
-                args.pid
+                pid
             );
         }
         _ => {}
     }
 
-    // ── NVML advisory (Linux only) ───────────────────────────────────────────
+    //  NVML advisory (Linux only)
     #[cfg(target_os = "linux")]
     if !process_info.nvml_available {
         eprintln!(
@@ -66,12 +74,12 @@ pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
     }
 
     info!(
-        pid = args.pid,
+        pid = pid,
         gpu = %process_info.primary_gpu_name,
         "Attached to training process"
     );
 
-    // ── 2. Load GPU spec ─────────────────────────────────────────────────
+    // 2. Load GPU spec
     let gpu_name = process_info.primary_gpu_name.clone();
     let gpu_spec = tokio::task::spawn_blocking(move || gpu_specs::resolve(&gpu_name))
         .await
@@ -79,15 +87,14 @@ pub async fn run(args: WatchArgs) -> anyhow::Result<()> {
 
     info!(gpu_spec = ?gpu_spec, "GPU spec loaded");
 
-    // ── 3. Set up shared stop flag ────────────────────────────────────────
+    // 3. Set up shared stop flag
     let stop = Arc::new(AtomicBool::new(false));
 
     let interval = Duration::from_secs_f64(args.interval);
-    let pid = args.pid;
 
     let (tx, rx) = flume::bounded::<crate::collectors::RawSample>(64);
 
-    // ── 4+5. Spawn collectors (platform-specific) ─────────────────────────
+    // 4+5. Spawn collectors (platform-specific)
     #[cfg(target_os = "linux")]
     {
         // Shared cpu% written by ProcCollector, read by NvmlCollector.

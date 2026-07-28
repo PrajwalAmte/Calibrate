@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::bench::input::{BenchInput, ModelFormat};
 use crate::bench::runtime::{Runtime, RuntimeDescriptor};
 
-// ── Embedded Python driver script
+// Embedded Python driver script
 
 /// Driver that converts an ONNX model to a TensorRT engine, runs inference,
 /// and streams timing results back as JSONL.
@@ -41,7 +41,7 @@ except ImportError as e:
 
 TRT_LOGGER = trt.Logger(trt.Logger.ERROR)
 
-# ── Build TensorRT engine from ONNX ──────────────────────────────────────────
+# Build TensorRT engine from ONNX 
 t0 = time.perf_counter()
 try:
     builder  = trt.Builder(TRT_LOGGER)
@@ -71,7 +71,7 @@ except Exception as e:
 load_ms = (time.perf_counter() - t0) * 1000
 emit({"type": "load_ms", "value": load_ms})
 
-# ── Allocate I/O buffers ──────────────────────────────────────────────────────
+# Allocate I/O buffers 
 rng = np.random.default_rng(seed=0xCAFEBABE)
 h_inputs, d_inputs, d_outputs, h_outputs, bindings = [], [], [], [], []
 
@@ -100,18 +100,18 @@ def run_once():
     context.execute_async_v3(stream_handle=stream.handle)
     stream.synchronize()
 
-# ── Warm-up ───────────────────────────────────────────────────────────────────
+# Warm-up ─
 for _ in range(warmup_iters):
     run_once()
 
-# ── Measurement ───────────────────────────────────────────────────────────────
+# Measurement 
 for _ in range(measure_iters):
     t0 = time.perf_counter()
     run_once()
     elapsed_us = int((time.perf_counter() - t0) * 1_000_000)
     emit({"type": "latency_us", "value": elapsed_us})
 
-# ── Throughput window ─────────────────────────────────────────────────────────
+# Throughput window 
 count = 0
 deadline = time.perf_counter() + tput_window_s
 while time.perf_counter() < deadline:
@@ -121,7 +121,7 @@ elapsed = time.perf_counter() - (deadline - tput_window_s)
 emit({"type": "throughput_rps", "value": count / elapsed if elapsed > 0 else 0})
 "#;
 
-// ── Deserialization helpers
+// Deserialization helpers
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -151,7 +151,7 @@ fn parse_driver_output(stdout: &[u8]) -> Result<Vec<DriverRecord>> {
     Ok(records)
 }
 
-// ── TensorRtRuntime
+// TensorRtRuntime
 
 pub struct TensorRtRuntime {
     model_path: Option<std::path::PathBuf>,

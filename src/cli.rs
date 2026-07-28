@@ -22,6 +22,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Check that all calibrate dependencies are installed and working correctly.
+    ///
+    /// Inspects the NVIDIA driver stack (nvidia-smi, NVML library, /dev/nvidiactl),
+    /// or the Apple IOKit GPU service on macOS, and prints a pass/fail report with
+    /// actionable remediation steps for every failed check.
+    Diagnose(DiagnoseArgs),
     /// Attach to a training process and analyze GPU efficiency in real time.
     Watch(WatchArgs),
     /// Verify the collector pipeline: print raw RawSamples as JSON to stdout.
@@ -44,6 +50,10 @@ pub enum Commands {
     Plan(PlanArgs),
 }
 
+/// Arguments accepted by `calibrate diagnose`.
+#[derive(Debug, clap::Args)]
+pub struct DiagnoseArgs {}
+
 /// Arguments accepted by `calibrate probe`.
 #[derive(Debug, clap::Args)]
 pub struct ProbeArgs {
@@ -61,11 +71,35 @@ pub struct ProbeArgs {
 }
 
 /// Arguments accepted by `calibrate watch`.
+///
+/// Exactly one of `--pid`, `--process-name`, or `--auto` must be provided.
 #[derive(Debug, clap::Args)]
+#[group(required = true, multiple = false, id = "target")]
 pub struct WatchArgs {
     /// Process ID of the running training job.
-    #[arg(short, long, value_name = "PID")]
-    pub pid: u32,
+    ///
+    /// Use this when you already know the PID:
+    ///   calibrate watch --pid 38291
+    #[arg(short, long, value_name = "PID", group = "target")]
+    pub pid: Option<u32>,
+
+    /// Attach by process name (regex match against the full command line).
+    ///
+    /// calibrate watch --process-name "train\.py"
+    /// calibrate watch --process-name "torch|lightning"
+    ///
+    /// If multiple processes match, calibrate lists them and exits.
+    /// Use --auto to pick interactively instead.
+    #[arg(short = 'n', long, value_name = "PATTERN", group = "target")]
+    pub process_name: Option<String>,
+
+    /// Auto-discover training processes and present an interactive selector.
+    ///
+    /// Scans running processes for Python-based training jobs (torch, tensorflow,
+    /// jax, lightning, keras). If exactly one match is found it attaches
+    /// immediately. If multiple match, an interactive numbered menu is shown.
+    #[arg(short = 'a', long, group = "target")]
+    pub auto: bool,
 
     /// Hourly GPU cost in USD (e.g. 0.34). Used to show dollar-denominated waste.
     #[arg(short = 'c', long, value_name = "USD/HR")]
@@ -89,7 +123,7 @@ pub enum OutputFormat {
     Json,
 }
 
-// ── calibrate bench───
+//  calibrate bench
 
 /// Arguments accepted by `calibrate bench`.
 #[derive(Debug, clap::Args)]
@@ -154,7 +188,7 @@ pub enum BenchOutputFormat {
     Markdown,
 }
 
-// ── calibrate plan────
+//  calibrate plan
 
 /// Arguments accepted by `calibrate plan`.
 #[derive(Debug, clap::Args)]

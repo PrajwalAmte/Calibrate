@@ -70,7 +70,7 @@ impl OutputRenderer for TerminalRenderer {
     }
 }
 
-// ── Rendering helpers ─────────────────────────────────────────────────────────
+//  Rendering helpers
 
 fn render_frame(f: &mut Frame, snap: &SessionSnapshot) {
     let status_rows = u16::from(

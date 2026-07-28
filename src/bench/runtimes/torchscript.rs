@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::bench::input::{BenchInput, ModelFormat};
 use crate::bench::runtime::{Runtime, RuntimeDescriptor};
 
-// ── Embedded Python driver script
+// Embedded Python driver script
 
 const DRIVER_SCRIPT: &str = r#"
 import sys, json, time
@@ -31,7 +31,7 @@ except ImportError as e:
     emit({"type": "error", "message": f"torch not installed: {e}"})
     sys.exit(1)
 
-# ── Load ──────────────────────────────────────────────────────────────────────
+# Load 
 t0 = time.perf_counter()
 try:
     model = torch.jit.load(model_path, map_location="cpu")
@@ -57,7 +57,7 @@ except Exception as e:
 load_ms = (time.perf_counter() - t0) * 1000
 emit({"type": "load_ms", "value": load_ms})
 
-# ── Build input ───────────────────────────────────────────────────────────────
+# Build input 
 rng = np.random.default_rng(seed=0xCAFEBABE)
 
 # Attempt to infer input shape from the model's graph.
@@ -85,18 +85,18 @@ def run_once():
     elif device == "mps":
         torch.mps.synchronize()
 
-# ── Warm-up ───────────────────────────────────────────────────────────────────
+# Warm-up 
 for _ in range(warmup_iters):
     run_once()
 
-# ── Measurement ───────────────────────────────────────────────────────────────
+# Measurement 
 for _ in range(measure_iters):
     t0 = time.perf_counter()
     run_once()
     elapsed_us = int((time.perf_counter() - t0) * 1_000_000)
     emit({"type": "latency_us", "value": elapsed_us})
 
-# ── Throughput window ─────────────────────────────────────────────────────────
+# Throughput window 
 count = 0
 deadline = time.perf_counter() + tput_window_s
 while time.perf_counter() < deadline:
@@ -106,7 +106,7 @@ elapsed = time.perf_counter() - (deadline - tput_window_s)
 emit({"type": "throughput_rps", "value": count / elapsed if elapsed > 0 else 0})
 "#;
 
-// ── Deserialization helpers
+// Deserialization helpers
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -136,7 +136,7 @@ fn parse_driver_output(stdout: &[u8]) -> Result<Vec<DriverRecord>> {
     Ok(records)
 }
 
-// ── TorchScriptRuntime
+// TorchScriptRuntime
 
 pub struct TorchScriptRuntime {
     model_path: Option<std::path::PathBuf>,

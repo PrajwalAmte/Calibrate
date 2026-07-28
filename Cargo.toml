@@ -2,7 +2,7 @@
 name = "calibrate"
 version = "0.1.0"
 edition = "2021"
-authors = ["Prajwal Amte <prajwal@example.com>"]
+authors = ["Prajwal Amte <prajwalamte@github.com>"]
 description = "GPU training efficiency analyzer — real-time MFU, bottleneck detection, and actionable recommendations for NVIDIA GPU workloads"
 license = "MIT"
 repository = "https://github.com/PrajwalAmte/Calibrate"
@@ -67,6 +67,9 @@ libc = "0.2"
 
 # Fixed random input generation for bench
 rand = { version = "0.8", features = ["small_rng"] }
+
+# Process-name matching for --process-name and --auto flags
+regex = { version = "1", default-features = false, features = ["std"] }
 
 # Timestamps in BenchReport (comparison over time)
 chrono = { version = "0.4", features = ["serde"] }

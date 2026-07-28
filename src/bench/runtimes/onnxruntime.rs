@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::bench::input::{BenchInput, ModelFormat};
 use crate::bench::runtime::{Runtime, RuntimeDescriptor};
 
-// ── Embedded Python driver script
+// Embedded Python driver script
 
 /// A self-contained Python script written to a tempfile and executed as a
 /// subprocess. Returns newline-delimited JSON timing records to stdout and
@@ -47,7 +47,7 @@ except ImportError as e:
     emit({"type": "error", "message": f"onnxruntime not installed: {e}"})
     sys.exit(1)
 
-# ── Load ──────────────────────────────────────────────────────────────────────
+# Load 
 t0 = time.perf_counter()
 try:
     import platform
@@ -64,7 +64,7 @@ except Exception as e:
 load_ms = (time.perf_counter() - t0) * 1000
 emit({"type": "load_ms", "value": load_ms})
 
-# ── Build input ───────────────────────────────────────────────────────────────
+# Build input 
 inputs = {}
 for inp in session.get_inputs():
     shape = [batch_size if (isinstance(d, str) or d is None or d == 0) else d
@@ -83,18 +83,18 @@ output_names = [o.name for o in session.get_outputs()]
 def run_once():
     session.run(output_names, inputs)
 
-# ── Warm-up ───────────────────────────────────────────────────────────────────
+# Warm-up 
 for _ in range(warmup_iters):
     run_once()
 
-# ── Measurement ───────────────────────────────────────────────────────────────
+# Measurement 
 for _ in range(measure_iters):
     t0 = time.perf_counter()
     run_once()
     elapsed_us = int((time.perf_counter() - t0) * 1_000_000)
     emit({"type": "latency_us", "value": elapsed_us})
 
-# ── Throughput window ─────────────────────────────────────────────────────────
+# Throughput window
 count = 0
 deadline = time.perf_counter() + tput_window_s
 while time.perf_counter() < deadline:
@@ -104,7 +104,7 @@ elapsed = time.perf_counter() - (deadline - tput_window_s)
 emit({"type": "throughput_rps", "value": count / elapsed if elapsed > 0 else 0})
 "#;
 
-// ── OnnxRuntime struct
+// OnnxRuntime struct
 
 pub struct OnnxRuntime {
     model_path: Option<std::path::PathBuf>,
@@ -151,7 +151,7 @@ impl OnnxRuntime {
     }
 }
 
-// ── Deserialization helpers
+// Deserialization helpers
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -181,7 +181,7 @@ fn parse_driver_output(stdout: &[u8]) -> Result<Vec<DriverRecord>> {
     Ok(records)
 }
 
-// ── Runtime impl
+// Runtime impl
 
 impl Runtime for OnnxRuntime {
     fn name(&self) -> &str {

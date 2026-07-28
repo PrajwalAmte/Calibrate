@@ -10,7 +10,7 @@ use metal::{
 use crate::bench::input::{BenchInput, ModelFormat};
 use crate::bench::runtime::{Runtime, RuntimeDescriptor};
 
-// ── MSL kernel ────────────────────────────────────────────────────────────────
+// MSL kernel
 
 /// Single-dispatch GEMV kernel: each thread computes one output element.
 ///
@@ -36,7 +36,7 @@ kernel void bench_matmul(
 }
 "#;
 
-// ── MetalRuntime ──────────────────────────────────────────────────────────────
+// MetalRuntime
 
 /// Inference runtime that dispatches a GEMV (matrix × vector) operation via
 /// Apple's Metal GPU compute API.
@@ -146,7 +146,7 @@ impl Runtime for MetalRuntime {
     fn load(&mut self, model_path: &Path) -> Result<Duration> {
         let start = Instant::now();
 
-        // ── Validate SafeTensors header ──────────────────────────────────
+        // Validate SafeTensors header
         let bytes = std::fs::read(model_path)
             .with_context(|| format!("cannot read {}", model_path.display()))?;
         if bytes.len() < 8 {
@@ -157,19 +157,19 @@ impl Runtime for MetalRuntime {
             bail!("SafeTensors header is truncated");
         }
 
-        // ── Parse the first tensor shape to determine M, K ───────────────
+        // Parse the first tensor shape to determine M, K
         let header_json = &bytes[8..8 + header_len];
         let (m, k) = parse_first_tensor_shape(header_json)?;
         self.dims = [m, k];
 
-        // ── Initialise Metal ─────────────────────────────────────────────
+        // Initialise Metal
         let device = Device::system_default()
             .context("No Metal device found — is this macOS with Apple/AMD GPU?")?;
 
         let pipeline = Self::build_pipeline(&device)?;
         let queue = device.new_command_queue();
 
-        // ── Allocate weight buffer from SafeTensors data ─────────────────
+        // Allocate weight buffer from SafeTensors data
         // The data section starts at byte offset 8 + header_len.
         // We take at most M*K*4 bytes; if the file has fewer, we zero-pad.
         let data_offset = 8 + header_len;
@@ -277,7 +277,7 @@ impl Runtime for MetalRuntime {
     }
 }
 
-// ── SafeTensors header parsing ────────────────────────────────────────────────
+// SafeTensors header parsing ─
 
 /// Extract `[M, K]` from the first tensor entry in the SafeTensors header JSON.
 ///

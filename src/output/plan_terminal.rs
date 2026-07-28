@@ -4,7 +4,7 @@ use crate::plan::{AvailabilityStatus, ListingFlag, PlanReport};
 pub fn render(report: &PlanReport, budget: Option<f64>) {
     let w = &report.workload;
 
-    // ── Section 1: Workload analysis──────────
+    //  Section 1: Workload analysis
     println!();
     println!(
         "  Model:     {}  ({:.2}B parameters)",
@@ -53,7 +53,7 @@ pub fn render(report: &PlanReport, budget: Option<f64>) {
     println!("  {}  {}", "-".repeat(25), "-".repeat(7));
     println!("  {:25}  {:>7.2}", "Total", w.vram_breakdown.total_gib);
 
-    // ── Section 2: Pricing table───────────
+    //  Section 2: Pricing table
     if report.listings.is_empty() {
         println!();
         println!(
@@ -141,7 +141,7 @@ pub fn render(report: &PlanReport, budget: Option<f64>) {
         }
     }
 
-    // ── Section 3: Recommendation──────────
+    //  Section 3: Recommendation
     println!();
     if let Some(rec) = &report.recommendation {
         println!(
@@ -165,7 +165,7 @@ pub fn render(report: &PlanReport, budget: Option<f64>) {
         );
     }
 
-    // ── Skipped providers─────────
+    //  Skipped providers
     if !report.skipped_providers.is_empty() {
         println!();
         println!("  Skipped:");
@@ -317,7 +317,7 @@ mod tests {
         render(&report, None);
     }
 
-    // ── format_flags tests────────────────────
+    //  format_flags tests
 
     #[test]
     fn format_flags_empty() {

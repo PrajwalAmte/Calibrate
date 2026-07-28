@@ -11,7 +11,7 @@ use crate::collectors::{MetricsCollector, RawSample};
 use crate::error::CalibrateError;
 use crate::metrics::units::{Celsius, Mhz, Mib, Percent, Watts};
 
-// ── IOKit / CoreFoundation type aliases ───────────────────────────────────────
+// IOKit / CoreFoundation type aliases
 
 type IOObject = u32;
 type KernReturn = c_int;
@@ -20,7 +20,7 @@ const KERN_SUCCESS: KernReturn = 0;
 const CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
 const CF_NUMBER_SINT64_TYPE: c_int = 4;
 
-// ── IOKit FFI ─────────────────────────────────────────────────────────────────
+// IOKit FFI
 
 #[link(name = "IOKit", kind = "framework")]
 extern "C" {
@@ -40,7 +40,7 @@ extern "C" {
     ) -> KernReturn;
 }
 
-// ── CoreFoundation FFI ────────────────────────────────────────────────────────
+// CoreFoundation FFI
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
@@ -54,7 +54,7 @@ extern "C" {
     fn CFNumberGetValue(number: *const c_void, the_type: c_int, value_ptr: *mut c_void) -> bool;
 }
 
-// ── CF helpers ────────────────────────────────────────────────────────────────
+// CF helpers
 
 /// Look up a value in a `CFDictionary` by a NUL-terminated UTF-8 key.
 ///
@@ -104,7 +104,7 @@ unsafe fn cf_dict_i64(dict: *const c_void, key: &[u8]) -> Option<i64> {
     }
 }
 
-// ── GPU snapshot ──────────────────────────────────────────────────────────────
+// GPU snapshot
 
 struct GpuSnapshot {
     utilization_pct: f32,
@@ -194,7 +194,7 @@ unsafe fn extract_snapshot(props: *const c_void) -> Option<GpuSnapshot> {
     })
 }
 
-// ── System memory ─────────────────────────────────────────────────────────────
+// System memory
 
 /// Total physical RAM in bytes via `sysctl hw.memsize`.
 ///
@@ -219,7 +219,7 @@ fn total_memory_bytes() -> u64 {
     }
 }
 
-// ── Process liveness ──────────────────────────────────────────────────────────
+// Process liveness
 
 /// Returns `true` if `pid` is still alive.
 ///
@@ -229,7 +229,7 @@ fn process_is_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-// ── Collector ─────────────────────────────────────────────────────────────────
+// Collector
 
 /// Collects Apple Silicon (and AMD/Intel Mac) GPU metrics via IOKit on a
 /// dedicated OS thread.
@@ -267,7 +267,7 @@ impl AppleGpuCollector {
 impl MetricsCollector for AppleGpuCollector {
     fn run(self, tx: flume::Sender<RawSample>, stop: Arc<AtomicBool>) {
         let total_bytes = total_memory_bytes();
-        let total_mib = Mib((total_bytes / (1024 * 1024)) as u64);
+        let total_mib = Mib(total_bytes / (1024 * 1024));
 
         info!(pid = self.pid, "AppleGpuCollector started");
 

@@ -36,7 +36,7 @@ pub enum ContainerContext {
 ///
 /// Fails fast with actionable errors rather than silently producing empty metrics.
 pub fn attach(pid: u32) -> Result<ProcessInfo, CalibrateError> {
-    // ── Process liveness check (platform-specific) ───────────────────────
+    //  Process liveness check (platform-specific)
     #[cfg(target_os = "linux")]
     {
         let proc_path = format!("/proc/{pid}");
@@ -56,7 +56,7 @@ pub fn attach(pid: u32) -> Result<ProcessInfo, CalibrateError> {
         return Err(CalibrateError::ProcessNotFound { pid });
     }
 
-    // ── GPU detection (platform-specific) ────────────────────────────────
+    //  GPU detection (platform-specific)
     #[cfg(target_os = "linux")]
     let (gpu_indices, primary_gpu_name, nvml_available) = {
         match find_gpu_indices(pid) {
@@ -166,7 +166,7 @@ fn find_gpu_indices(pid: u32) -> Result<(Vec<u32>, String), CalibrateError> {
     Ok((indices, primary_name))
 }
 
-// ── Tests───────────
+//  Tests
 
 #[cfg(test)]
 mod tests {
