@@ -29,7 +29,7 @@ nvml-wrapper = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 
 # Terminal UI
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 
 # Async runtime
