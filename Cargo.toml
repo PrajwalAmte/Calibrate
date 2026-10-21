@@ -23,7 +23,7 @@ path = "src/main.rs"
 
 [dependencies]
 # NVML bindings
-nvml-wrapper = "0.10"
+nvml-wrapper = "0.13"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
