@@ -1,0 +1,78 @@
+# Node agent: one calibrate per GPU node, device-level metrics on :9400.
+#
+# Scrape with Prometheus (see podmonitor.yaml) and join with pod metadata via
+# the node and GPU labels. Requires the NVIDIA device plugin / GPU operator
+# (RuntimeClass "nvidia"). Adjust the image to your registry.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: calibrate
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: calibrate
+  namespace: calibrate
+  labels: { app.kubernetes.io/name: calibrate }
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/name: calibrate }
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: calibrate }
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      priorityClassName: system-node-critical
+      automountServiceAccountToken: false
+      containers:
+        - name: calibrate
+          image: ghcr.io/prajwalamte/calibrate:0.2.0
+          args:
+            - watch
+            - --gpus=all
+            - --output=none
+            - --interval=5
+            - --prometheus-listen=0.0.0.0:9400
+            - --offline
+            - --log-format=json
+          env:
+            # See every GPU on the node without requesting one from the scheduler.
+            - { name: NVIDIA_VISIBLE_DEVICES, value: all }
+            - { name: NVIDIA_DRIVER_CAPABILITIES, value: utility }
+          ports:
+            - { name: metrics, containerPort: 9400 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: calibrate
+  namespace: calibrate
+  labels: { app.kubernetes.io/name: calibrate }
+spec:
+  clusterIP: None
+  selector: { app.kubernetes.io/name: calibrate }
+  ports:
+    - { name: metrics, port: 9400, targetPort: metrics }

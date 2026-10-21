@@ -31,6 +31,13 @@ pub struct BenchResult {
     pub flagged_unreliable: bool,
     /// True if the runtime ran out of memory at this batch size.
     pub oom: bool,
+    /// Kernel microbenchmark rather than model inference (never recommended).
+    #[serde(default)]
+    pub synthetic: bool,
+    /// Where `peak_memory_mib` came from: "device" (GPU/MPS allocator in the
+    /// runtime's process), "host_rss" (runtime process RSS), "nvml", "none".
+    #[serde(default)]
+    pub memory_source: String,
 }
 
 /// A runtime that was not benchmarked, with the reason why.

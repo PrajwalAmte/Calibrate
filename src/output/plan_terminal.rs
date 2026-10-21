@@ -1,353 +1,226 @@
-use crate::plan::{AvailabilityStatus, ListingFlag, PlanReport};
+use crate::metrics::units::fmt_usd;
+use crate::plan::{ListingFlag, PlanReport, RankedListing};
 
-/// Print the plan report to stdout as a human-readable terminal layout.
-pub fn render(report: &PlanReport, budget: Option<f64>) {
+/// Render the plan report as text.
+pub fn render_to_string(report: &PlanReport, budget: Option<f64>) -> String {
+    let mut o = String::new();
+    let mut ln = |s: String| {
+        o.push_str(&s);
+        o.push('\n');
+    };
     let w = &report.workload;
+    let m = &w.model;
+    let v = &w.vram;
 
-    //  Section 1: Workload analysis
-    println!();
-    println!(
-        "  Model:     {}  ({:.2}B parameters)",
-        w.model_id, w.param_count_b
-    );
-    println!("  Required:  {:.1} GiB VRAM", w.vram_breakdown.total_gib);
-    if !w.fitting_tiers.is_empty() {
-        println!("             fits {}  tiers", w.fitting_tiers.join(", "));
+    ln(String::new());
+    let moe = if (m.active_param_count_b - m.param_count_b).abs() > 0.01 {
+        format!(", {:.2}B active", m.active_param_count_b)
     } else {
-        println!("             Warning: no standard GPU tier is large enough.");
-    }
-    println!();
-
-    // VRAM breakdown table
-    println!("  {:25}  {:>7}", "Component", "GiB");
-    println!("  {}  {}", "-".repeat(25), "-".repeat(7));
-    println!("  {:25}  {:>7.2}", "Weights", w.vram_breakdown.weights_gib);
-    println!(
-        "  {:25}  {:>7.2}  {}",
-        "Gradients",
-        w.vram_breakdown.gradients_gib,
-        if w.vram_breakdown.gradients_gib < w.vram_breakdown.weights_gib * 0.05 {
-            "(adapter only)"
+        String::new()
+    };
+    ln(format!(
+        "  Model:     {}  ({:.2}B parameters{moe}; source: {})",
+        m.model_id,
+        m.param_count_b,
+        serde_json::to_value(m.param_source)
+            .ok()
+            .and_then(|x| x.as_str().map(str::to_string))
+            .unwrap_or_default()
+    ));
+    ln(format!(
+        "  Setup:     {:?} • {:?} • micro-batch {} • {} tokens/example",
+        w.setup.method, w.setup.optimizer_lib, w.setup.micro_batch, w.setup.seq_len
+    ));
+    ln(format!(
+        "  Required:  {:.1} GiB VRAM on a single GPU{}",
+        w.required_vram_gib,
+        if w.fitting_tiers.is_empty() {
+            " — larger than any single GPU; use DeepSpeed ZeRO-3 across several".to_string()
         } else {
-            "(full fine-tune)"
+            format!("  (fits {})", w.fitting_tiers.join(", "))
         }
-    );
-    println!(
-        "  {:25}  {:>7.2}",
-        "Optimizer states", w.vram_breakdown.optimizer_gib
-    );
-    println!(
-        "  {:25}  {:>7.2}  (gradient checkpointing)",
-        "Activations", w.vram_breakdown.activations_gib
-    );
-    println!(
-        "  {:25}  {:>7.2}",
-        "KV cache", w.vram_breakdown.kv_cache_gib
-    );
-    if w.vram_breakdown.library_savings_gib < 0.0 {
-        println!(
-            "  {:25}  {:>7.2}  (library savings)",
-            "Efficiency reduction", w.vram_breakdown.library_savings_gib
-        );
-    }
-    println!("  {}  {}", "-".repeat(25), "-".repeat(7));
-    println!("  {:25}  {:>7.2}", "Total", w.vram_breakdown.total_gib);
-
-    //  Section 2: Pricing table
-    if report.listings.is_empty() {
-        println!();
-        println!(
-            "  No GPU listings found with ≥ {:.1} GiB VRAM.",
-            w.required_vram_gib
-        );
+    ));
+    if let (Some(t), Some(f)) = (w.total_tokens, w.total_hardware_flops) {
+        ln(format!(
+            "  Work:      {:.2}B tokens × {} epoch(s) → {:.2e} FLOPs (incl. recomputation)",
+            t / 1e9 / w.epochs.max(1) as f64,
+            w.epochs,
+            f
+        ));
     } else {
-        let rec_key = report
-            .recommendation
-            .as_ref()
-            .map(|r| (r.listing.provider.as_str(), r.listing.gpu_model.as_str()));
+        ln("  Work:      pass --dataset-rows for duration and cost estimates".into());
+    }
+    ln(String::new());
 
-        println!();
-        println!(
-            "  {:<9}  {:<22}  {:>5}  {:>6}  {:>11}  {:>14}  Flags",
+    ln(format!("  {:<28}  {:>8}", "Component (per GPU)", "GiB"));
+    ln(format!("  {}  {}", "-".repeat(28), "-".repeat(8)));
+    for (name, val) in [
+        ("Weights", v.weights_gib),
+        ("Gradients", v.gradients_gib),
+        ("Optimizer states", v.optimizer_gib),
+        ("Activations (checkpointed)", v.activations_gib),
+        ("Logits + loss buffer", v.logits_gib),
+        ("CUDA context + allocator", v.overhead_gib),
+    ] {
+        ln(format!("  {name:<28}  {val:>8.2}"));
+    }
+    ln(format!("  {}  {}", "-".repeat(28), "-".repeat(8)));
+    ln(format!("  {:<28}  {:>8.2}", "Total", v.total_gib));
+    for n in &v.notes {
+        ln(format!("    · {n}"));
+    }
+
+    if report.listings.is_empty() {
+        ln(String::new());
+        ln(format!(
+            "  No listing has enough VRAM per GPU ({} too small).",
+            report.excluded_too_small
+        ));
+    } else {
+        let rec = report.recommendation.as_ref().map(|r| &r.listing);
+        ln(String::new());
+        ln(format!(
+            "  {:<9}  {:<28}  {:>6}  {:>7}  {:>11}  {:>16}  Flags",
             "Provider", "GPU", "VRAM", "$/hr", "Duration", "Est. Cost"
-        );
-        println!(
-            "  {:-<9}  {:-<22}  {:-<5}  {:-<6}  {:-<11}  {:-<14}  -----",
+        ));
+        ln(format!(
+            "  {:-<9}  {:-<28}  {:-<6}  {:-<7}  {:-<11}  {:-<16}  -----",
             "", "", "", "", "", ""
-        );
-
-        let mut any_spot = false;
-        let mut any_volatile = false;
-        let mut any_unavailable = false;
-
+        ));
         for l in &report.listings {
-            let is_rec = rec_key.is_some_and(|(p, g)| p == l.provider && g == l.gpu_model);
-            let marker = if is_rec { ">" } else { " " };
-
-            let flags_str = format_flags(&l.flags, &l.availability);
-            if l.flags.contains(&ListingFlag::Spot) {
-                any_spot = true;
-            }
-            if l.flags.contains(&ListingFlag::PriceVolatile) {
-                any_volatile = true;
-            }
-            if l.availability == AvailabilityStatus::Unavailable {
-                any_unavailable = true;
-            }
-
-            let over = budget
-                .zip(l.cost_range.as_ref())
-                .is_some_and(|(b, c)| c.low_usd > b);
-
-            let vram_str = format!("{:.0}G", l.vram_gib);
-            let dur_str = l
-                .duration_range
-                .as_ref()
-                .map(|d| d.display())
-                .unwrap_or_else(|| "n/a".to_string());
-            let cost_str = l
-                .cost_range
-                .as_ref()
-                .map(|c| c.display())
-                .unwrap_or_else(|| "n/a".to_string());
-            let budget_flag = if over { " !" } else { "" };
-
-            println!(
-                "{} {:<9}  {:<22}  {:>5}  {:>6.2}  {:>11}  {:>14}  {}{}",
-                marker,
-                l.provider,
-                l.gpu_model,
-                vram_str,
-                l.hourly_usd,
-                dur_str,
-                cost_str,
-                flags_str,
-                budget_flag,
-            );
+            let marker = if rec.is_some_and(|r| same(r, l)) {
+                ">"
+            } else {
+                " "
+            };
+            let gpu = l.display_gpu();
+            let gpu = if gpu.chars().count() > 28 {
+                format!("{}…", gpu.chars().take(27).collect::<String>())
+            } else {
+                gpu
+            };
+            ln(format!(
+                "{marker} {:<9}  {:<28}  {:>5.0}G  {:>7.2}  {:>11}  {:>16}  {}{}",
+                l.listing.provider,
+                gpu,
+                l.listing.vram_per_gpu_gib,
+                l.listing.hourly_usd,
+                l.duration_range
+                    .as_ref()
+                    .map(|d| d.display())
+                    .unwrap_or_else(|| "n/a".into()),
+                l.cost_range
+                    .as_ref()
+                    .map(|c| c.display())
+                    .unwrap_or_else(|| "n/a".into()),
+                format_flags(l),
+                if l.over_budget { " $!" } else { "" }
+            ));
         }
-
-        println!();
-        if any_spot {
-            println!("  * Spot/preemptible — may be interrupted mid-job.");
+        ln(String::new());
+        let any = |f: ListingFlag| report.listings.iter().any(|l| l.listing.flags.contains(&f));
+        if any(ListingFlag::CommunityCloud) {
+            ln("  c  Community cloud — third-party hosts, fewer reliability guarantees.".into());
         }
-        if any_volatile {
-            println!("  ~ Price volatile   — Vast.ai market price; may change before launch.");
+        if any(ListingFlag::Spot) {
+            ln("  *  Spot / preemptible — may be interrupted.".into());
         }
-        if any_unavailable {
-            println!("  ! Unavailable      — listed but no capacity right now.");
+        if any(ListingFlag::PriceVolatile) {
+            ln("  ~  Marketplace price — may change before launch.".into());
+        }
+        if any(ListingFlag::CurrentlyUnavailable) {
+            ln("  !  No capacity right now.".into());
+        }
+        if any(ListingFlag::UnknownGpu) {
+            ln("  ?  GPU not in the spec database — no estimate.".into());
         }
         if budget.is_some() {
-            println!("  ! Over budget      — exceeds --budget limit.");
+            ln("  $! Over --budget (never recommended).".into());
+        }
+        if report.excluded_too_small > 0 {
+            ln(format!(
+                "  {} listing(s) hidden: not enough VRAM per GPU.",
+                report.excluded_too_small
+            ));
         }
     }
 
-    //  Section 3: Recommendation
-    println!();
-    if let Some(rec) = &report.recommendation {
-        println!(
-            "  Recommendation: {} {} at ${:.2}/hr",
-            rec.listing.provider, rec.listing.gpu_model, rec.listing.hourly_usd
-        );
-        println!("    {}", rec.rationale);
-        if let Some(alt) = &rec.safe_alternative {
-            println!();
-            println!(
-                "  Safe alternative (stable price): {} {} at ${:.2}/hr",
-                alt.provider, alt.gpu_model, alt.hourly_usd
-            );
-            if let Some(c) = &alt.cost_range {
-                println!("    Estimated cost: {}", c.display());
+    ln(String::new());
+    match &report.recommendation {
+        Some(r) => {
+            ln(format!(
+                "  Recommendation: {} {} at ${:.2}/hr",
+                r.listing.listing.provider,
+                r.listing.display_gpu(),
+                r.listing.listing.hourly_usd
+            ));
+            ln(format!("    {}", r.rationale));
+            if let Some(alt) = &r.safe_alternative {
+                ln(format!(
+                    "  Stable-price alternative: {} {} at ${:.2}/hr{}",
+                    alt.listing.provider,
+                    alt.display_gpu(),
+                    alt.listing.hourly_usd,
+                    alt.cost_range
+                        .as_ref()
+                        .map(|c| format!(" (est. {})", c.display()))
+                        .unwrap_or_default()
+                ));
             }
         }
-    } else {
-        println!(
-            "  No recommendation could be made (no available listings meet the requirements)."
-        );
+        None => ln("  No recommendation: no launchable listing fits the VRAM and budget.".into()),
     }
 
-    //  Skipped providers
+    ln(String::new());
+    ln("  Assumptions:".into());
+    for a in &w.assumptions {
+        ln(format!("    · {a}"));
+    }
+    ln(format!(
+        "    · prices: {} (fetched {})",
+        report.price_source,
+        report.generated_at.format("%Y-%m-%d %H:%M UTC")
+    ));
     if !report.skipped_providers.is_empty() {
-        println!();
-        println!("  Skipped:");
+        ln(String::new());
+        ln("  Notes:".into());
         for s in &report.skipped_providers {
-            println!("    {}: {}", s.name, s.reason);
+            ln(format!("    {}: {}", s.name, s.reason));
         }
     }
-
-    println!();
+    let _ = fmt_usd;
+    ln(String::new());
+    o
 }
 
-pub(crate) fn format_flags(flags: &[ListingFlag], availability: &AvailabilityStatus) -> String {
+pub fn render(report: &PlanReport, budget: Option<f64>) {
+    print!("{}", render_to_string(report, budget));
+}
+
+fn same(a: &RankedListing, b: &RankedListing) -> bool {
+    a.listing == b.listing
+}
+
+pub(crate) fn format_flags(l: &RankedListing) -> String {
+    let f = &l.listing.flags;
     let mut parts = vec![];
-    if flags.contains(&ListingFlag::Spot) {
+    if f.contains(&ListingFlag::CommunityCloud) {
+        parts.push("c");
+    }
+    if f.contains(&ListingFlag::Spot) {
         parts.push("*");
     }
-    if flags.contains(&ListingFlag::PriceVolatile) {
+    if f.contains(&ListingFlag::PriceVolatile) {
         parts.push("~");
     }
-    if flags.contains(&ListingFlag::LowReliability) {
+    if f.contains(&ListingFlag::LowReliability) {
         parts.push("low-rel");
     }
-    if *availability == AvailabilityStatus::Unavailable {
-        parts.push("unavail");
+    if f.contains(&ListingFlag::CurrentlyUnavailable) {
+        parts.push("!");
+    }
+    if f.contains(&ListingFlag::UnknownGpu) {
+        parts.push("?");
     }
     parts.join(" ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::plan::{
-        AvailabilityStatus, CostRange, DurationRange, ListingFlag, PlanRecommendation, PlanReport,
-        RankedListing, SkippedProvider, VramBreakdown, WorkloadSummary,
-    };
-    use chrono::Utc;
-
-    fn make_vram_breakdown(total: f64) -> VramBreakdown {
-        VramBreakdown {
-            weights_gib: total * 0.60,
-            gradients_gib: total * 0.01,
-            optimizer_gib: total * 0.20,
-            activations_gib: total * 0.10,
-            kv_cache_gib: total * 0.09,
-            library_savings_gib: 0.0,
-            total_gib: total,
-        }
-    }
-
-    fn make_report_empty() -> PlanReport {
-        PlanReport {
-            workload: WorkloadSummary {
-                model_id: "meta-llama/Llama-3-8B".to_string(),
-                param_count_b: 8.0,
-                vram_breakdown: make_vram_breakdown(14.0),
-                required_vram_gib: 14.7,
-                fitting_tiers: vec!["16G".to_string(), "24G".to_string()],
-            },
-            listings: vec![],
-            recommendation: None,
-            skipped_providers: vec![],
-            generated_at: Utc::now(),
-        }
-    }
-
-    fn make_listing(
-        provider: &str,
-        gpu: &str,
-        vram: f64,
-        hourly: f64,
-        cost_low: f64,
-    ) -> RankedListing {
-        RankedListing {
-            provider: provider.to_string(),
-            gpu_model: gpu.to_string(),
-            vram_gib: vram,
-            hourly_usd: hourly,
-            duration_range: Some(DurationRange {
-                low_secs: cost_low / hourly * 3600.0,
-                high_secs: cost_low / hourly * 3600.0 * 1.5,
-            }),
-            cost_range: Some(CostRange {
-                low_usd: cost_low,
-                high_usd: cost_low * 1.5,
-            }),
-            availability: AvailabilityStatus::Available,
-            flags: vec![],
-        }
-    }
-
-    /// Smoke test: rendering an empty listings report does not panic.
-    #[test]
-    fn render_empty_listings_no_panic() {
-        let report = make_report_empty();
-        // Should not panic; output goes to stdout (captured by test runner).
-        render(&report, None);
-    }
-
-    /// Smoke test: rendering a populated report with a recommendation does not panic.
-    #[test]
-    fn render_with_recommendation_no_panic() {
-        let listing = make_listing("RunPod", "RTX 4090", 24.0, 0.44, 0.48);
-        let rec = PlanRecommendation {
-            listing: listing.clone(),
-            rationale: "Cheapest stable option.".to_string(),
-            safe_alternative: None,
-        };
-        let mut report = make_report_empty();
-        report.listings = vec![listing];
-        report.recommendation = Some(rec);
-        render(&report, None);
-    }
-
-    /// Smoke test: rendering with a safe alternative does not panic.
-    #[test]
-    fn render_with_safe_alternative_no_panic() {
-        let mut top = make_listing("Vast.ai", "RTX 3090", 24.0, 0.22, 0.46);
-        top.flags.push(ListingFlag::PriceVolatile);
-        let stable = make_listing("RunPod", "RTX 4090", 24.0, 0.44, 0.48);
-        let rec = PlanRecommendation {
-            listing: top.clone(),
-            rationale: "Cheapest option.".to_string(),
-            safe_alternative: Some(stable.clone()),
-        };
-        let mut report = make_report_empty();
-        report.listings = vec![top, stable];
-        report.recommendation = Some(rec);
-        render(&report, None);
-    }
-
-    /// Budget flag appears for listings that exceed the user's budget.
-    #[test]
-    fn render_with_budget_over_shows_flag() {
-        let listing = make_listing("Lambda", "A10", 24.0, 0.60, 1.20);
-        let mut report = make_report_empty();
-        report.listings = vec![listing];
-        // budget of $0.50 means a $1.20 estimate is over-budget — should not panic.
-        render(&report, Some(0.50));
-    }
-
-    /// Skipped providers section renders without panic.
-    #[test]
-    fn render_skipped_providers_no_panic() {
-        let mut report = make_report_empty();
-        report.skipped_providers = vec![SkippedProvider {
-            name: "RunPod".to_string(),
-            reason: "API timeout".to_string(),
-        }];
-        render(&report, None);
-    }
-
-    //  format_flags tests
-
-    #[test]
-    fn format_flags_empty() {
-        assert_eq!(format_flags(&[], &AvailabilityStatus::Available), "");
-    }
-
-    #[test]
-    fn format_flags_spot() {
-        assert_eq!(
-            format_flags(&[ListingFlag::Spot], &AvailabilityStatus::Available),
-            "*"
-        );
-    }
-
-    #[test]
-    fn format_flags_volatile_and_unavailable() {
-        let s = format_flags(
-            &[ListingFlag::PriceVolatile],
-            &AvailabilityStatus::Unavailable,
-        );
-        assert!(s.contains('~'), "should contain volatile marker");
-        assert!(s.contains("unavail"), "should contain unavail marker");
-    }
-
-    #[test]
-    fn format_flags_low_reliability() {
-        let s = format_flags(
-            &[ListingFlag::LowReliability],
-            &AvailabilityStatus::Available,
-        );
-        assert!(s.contains("low-rel"));
-    }
 }

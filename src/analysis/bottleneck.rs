@@ -1,163 +1,284 @@
-use crate::metrics::breakdown::TimeBreakdown;
+//! Picks the single most important problem from the measured data.
+
+use serde::Serialize;
+
+use crate::metrics::breakdown::{BreakdownSource, TimeBreakdown};
 use crate::metrics::mfu::MfuEstimate;
 
-/// The primary identified bottleneck for the current window.
-///
-/// Variants are ordered by detection priority.  Only the first matching
-/// condition is returned so the user always gets one clear answer.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// The primary identified bottleneck, in detection-priority order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Bottleneck {
-    /// Data loader is producing batches slower than the GPU can consume them.
-    DataLoader,
-    /// Excessive CUDA synchronization (`.item()`, scalar logging, etc.).
-    CudaSync,
-    /// High memory allocation/deallocation inside the training loop.
-    MemoryFragmentation,
-    /// GPU is reducing clock speed due to thermal stress.
+    /// Not enough data yet (first seconds of a session).
+    WarmingUp,
+    /// No GPU metrics are available (CPU-only fallback).
+    NoGpuMetrics,
+    /// The target process tree is not using any GPU.
+    NoGpuActivity,
+    /// Clocks reduced because the GPU is too hot.
     ThermalThrottle,
-    /// GPU clock is running significantly below boost for non-thermal reasons.
+    /// Clocks reduced by the board power limit.
+    PowerCapped,
+    /// Clocks reduced by a hardware slowdown signal (power brake, PSU, ...).
+    HardwareSlowdown,
+    /// GPUs of one job are unevenly loaded (straggler rank / device).
+    GpuImbalance,
+    /// The GPU waits on the input pipeline.
+    DataLoader,
+    /// GPU and CPU both idle: host sync, logging, checkpointing, collectives.
+    SyncStall,
+    /// Memory bandwidth bound with little compute.
+    MemoryBound,
+    /// The optimizer step takes a large share of each step.
+    OptimizerHeavy,
+    /// Clock well below boost with no throttle reason reported.
     ClockUnderspeed,
-    /// MFU is in the acceptable range but not optimal (25–45%).
+    /// Step times vary widely.
+    ErraticSteps,
+    /// MFU below target without a single dominant cause.
     BelowTargetMfu,
-    /// No significant bottleneck identified; training is well-optimized.
+    /// Only an MFU upper bound is available and it is above target, so real
+    /// efficiency cannot be judged.
+    Unverified,
+    /// No significant bottleneck.
     None,
 }
 
-/// Detects the primary bottleneck from measured data.
+/// Everything the detector looks at.
+#[derive(Debug, Clone)]
+pub struct DetectInput<'a> {
+    pub mfu: &'a MfuEstimate,
+    pub breakdown: &'a TimeBreakdown,
+    pub has_gpu_backend: bool,
+    pub gpus_in_use: usize,
+    pub thermal_throttle: bool,
+    pub power_cap: bool,
+    pub hw_slowdown: bool,
+    /// Mean SM clock relative to the spec's boost clock (percent), if known.
+    pub clock_pct_of_boost: Option<f32>,
+    /// Mean GPU busy fraction (percent).
+    pub busy_pct: Option<f32>,
+    pub steps_erratic: bool,
+    /// Spread of mean busy % across GPUs (multi-GPU jobs).
+    pub gpu_divergence_ppt: Option<f32>,
+    pub target_mfu: f32,
+    pub samples: usize,
+}
+
 pub struct BottleneckDetector;
 
 impl BottleneckDetector {
-    pub fn detect(
-        mfu: &MfuEstimate,
-        breakdown: &TimeBreakdown,
-        throttle_thermal: bool,
-        _throttle_power: bool,
-        sm_clock_pct: f32, // (current / max) * 100
-    ) -> Bottleneck {
-        // Thermal throttling takes priority — it's an immediate hardware concern.
-        if throttle_thermal {
+    pub fn detect(i: &DetectInput) -> Bottleneck {
+        if !i.has_gpu_backend {
+            return Bottleneck::NoGpuMetrics;
+        }
+        if i.samples < 3 {
+            return Bottleneck::WarmingUp;
+        }
+        if i.gpus_in_use == 0 {
+            return Bottleneck::NoGpuActivity;
+        }
+        if i.thermal_throttle {
             return Bottleneck::ThermalThrottle;
         }
-
-        // Data loader > 15% of step time.
-        if breakdown.data_loader_pct > 15.0 {
-            return Bottleneck::DataLoader;
+        let clock_low = i.clock_pct_of_boost.is_some_and(|c| c < 90.0);
+        if i.power_cap && clock_low {
+            return Bottleneck::PowerCapped;
+        }
+        if i.hw_slowdown {
+            return Bottleneck::HardwareSlowdown;
+        }
+        if i.gpu_divergence_ppt.is_some_and(|d| d > 20.0) {
+            return Bottleneck::GpuImbalance;
         }
 
-        // CUDA sync > 8% of step time.
-        if breakdown.cuda_sync_pct > 8.0 {
-            return Bottleneck::CudaSync;
+        let b = i.breakdown;
+        if b.source != BreakdownSource::Unavailable {
+            if b.data_wait_pct > 15.0 {
+                return Bottleneck::DataLoader;
+            }
+            if b.sync_stall_pct > 10.0 {
+                return Bottleneck::SyncStall;
+            }
+            if b.memory_bound_pct > 15.0 {
+                return Bottleneck::MemoryBound;
+            }
+            if b.optimizer_pct > 20.0 {
+                return Bottleneck::OptimizerHeavy;
+            }
         }
 
-        // Memory allocation > 10% of step time.
-        if breakdown.memory_alloc_pct > 10.0 {
-            return Bottleneck::MemoryFragmentation;
-        }
-
-        // Clock running at < 85% of boost (power-limited or driver state).
-        if sm_clock_pct < 85.0 && !throttle_thermal {
+        let busy = i.busy_pct.unwrap_or(0.0);
+        if busy > 50.0
+            && i.clock_pct_of_boost.is_some_and(|c| c < 85.0)
+            && !i.power_cap
+            && !i.hw_slowdown
+        {
             return Bottleneck::ClockUnderspeed;
         }
-
-        // MFU below target but no specific bottleneck dominant.
-        if mfu.mfu_pct.0 < 45.0 {
-            return Bottleneck::BelowTargetMfu;
+        if i.steps_erratic {
+            return Bottleneck::ErraticSteps;
         }
 
-        Bottleneck::None
+        match i.mfu.mfu_pct {
+            Some(m) if m < i.target_mfu => Bottleneck::BelowTargetMfu,
+            Some(_) if i.mfu.upper_bound => Bottleneck::Unverified,
+            Some(_) => Bottleneck::None,
+            None => Bottleneck::Unverified,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::breakdown::TimeBreakdown;
-    use crate::metrics::mfu::{Confidence, MfuEstimate};
-    use crate::metrics::units::{Percent, Tflops};
+    use crate::metrics::mfu::{Confidence, MfuSource};
 
-    fn mfu(pct: f32) -> MfuEstimate {
+    fn mfu(pct: f32, upper: bool) -> MfuEstimate {
         MfuEstimate {
-            mfu_pct: Percent(pct),
-            actual_tflops: Tflops(1.0),
-            peak_tflops: Tflops(35.6),
+            mfu_pct: Some(pct),
+            source: if upper {
+                MfuSource::KernelBusy
+            } else {
+                MfuSource::TensorActive
+            },
+            upper_bound: upper,
+            achieved_tflops: None,
+            peak_tflops: None,
             confidence: Confidence::High,
         }
     }
 
-    fn breakdown(dl: f32, sync: f32, mem: f32) -> TimeBreakdown {
-        let rest = (100.0 - dl - sync - mem).max(0.0);
+    fn bd(data: f32, sync: f32, mem: f32) -> TimeBreakdown {
         TimeBreakdown {
-            forward_backward_pct: rest,
-            data_loader_pct: dl,
-            cuda_sync_pct: sync,
-            memory_alloc_pct: mem,
+            source: BreakdownSource::Heuristic,
+            compute_pct: 100.0 - data - sync - mem,
+            data_wait_pct: data,
+            sync_stall_pct: sync,
+            memory_bound_pct: mem,
             optimizer_pct: 0.0,
+            other_pct: 0.0,
+        }
+    }
+
+    fn input<'a>(m: &'a MfuEstimate, b: &'a TimeBreakdown) -> DetectInput<'a> {
+        DetectInput {
+            mfu: m,
+            breakdown: b,
+            has_gpu_backend: true,
+            gpus_in_use: 1,
+            thermal_throttle: false,
+            power_cap: false,
+            hw_slowdown: false,
+            clock_pct_of_boost: Some(100.0),
+            busy_pct: Some(90.0),
+            steps_erratic: false,
+            gpu_divergence_ppt: None,
+            target_mfu: 45.0,
+            samples: 30,
         }
     }
 
     #[test]
-    fn data_loader_wins() {
-        let b =
-            BottleneckDetector::detect(&mfu(20.0), &breakdown(28.0, 3.0, 1.0), false, false, 95.0);
-        assert_eq!(b, Bottleneck::DataLoader);
+    fn straggler_gpu_is_reported() {
+        let (m, b) = (mfu(42.0, false), bd(0.0, 0.0, 0.0));
+        let mut i = input(&m, &b);
+        i.gpu_divergence_ppt = Some(35.0);
+        assert_eq!(BottleneckDetector::detect(&i), Bottleneck::GpuImbalance);
+        i.gpu_divergence_ppt = Some(5.0);
+        assert_eq!(BottleneckDetector::detect(&i), Bottleneck::BelowTargetMfu);
     }
 
     #[test]
-    fn thermal_has_highest_priority() {
-        let b =
-            BottleneckDetector::detect(&mfu(20.0), &breakdown(28.0, 9.0, 12.0), true, false, 95.0);
-        assert_eq!(b, Bottleneck::ThermalThrottle);
+    fn missing_backend_is_reported_honestly() {
+        let (m, b) = (MfuEstimate::unavailable(), TimeBreakdown::unavailable());
+        let mut i = input(&m, &b);
+        i.has_gpu_backend = false;
+        assert_eq!(BottleneckDetector::detect(&i), Bottleneck::NoGpuMetrics);
     }
 
     #[test]
-    fn no_bottleneck_at_good_mfu() {
-        let b =
-            BottleneckDetector::detect(&mfu(55.0), &breakdown(5.0, 2.0, 1.0), false, false, 97.0);
-        assert_eq!(b, Bottleneck::None);
+    fn idle_process_is_no_activity_not_cuda_sync() {
+        let (m, b) = (MfuEstimate::unavailable(), TimeBreakdown::unavailable());
+        let mut i = input(&m, &b);
+        i.gpus_in_use = 0;
+        assert_eq!(BottleneckDetector::detect(&i), Bottleneck::NoGpuActivity);
     }
 
     #[test]
-    fn cuda_sync_detected() {
-        let b =
-            BottleneckDetector::detect(&mfu(30.0), &breakdown(5.0, 12.0, 1.0), false, false, 95.0);
-        assert_eq!(b, Bottleneck::CudaSync);
+    fn thermal_beats_everything() {
+        let (m, b) = (mfu(20.0, false), bd(40.0, 0.0, 0.0));
+        let mut i = input(&m, &b);
+        i.thermal_throttle = true;
+        assert_eq!(BottleneckDetector::detect(&i), Bottleneck::ThermalThrottle);
     }
 
     #[test]
-    fn memory_fragmentation_detected() {
-        let b =
-            BottleneckDetector::detect(&mfu(30.0), &breakdown(5.0, 2.0, 15.0), false, false, 95.0);
-        assert_eq!(b, Bottleneck::MemoryFragmentation);
+    fn power_cap_needs_reduced_clock() {
+        let (m, b) = (mfu(60.0, false), bd(0.0, 0.0, 0.0));
+        let mut i = input(&m, &b);
+        i.power_cap = true;
+        assert_eq!(BottleneckDetector::detect(&i), Bottleneck::None);
+        i.clock_pct_of_boost = Some(80.0);
+        assert_eq!(BottleneckDetector::detect(&i), Bottleneck::PowerCapped);
     }
 
     #[test]
-    fn clock_underspeed_detected() {
-        // Low clock (80%), no other bottleneck triggers.
-        let b =
-            BottleneckDetector::detect(&mfu(30.0), &breakdown(5.0, 2.0, 1.0), false, false, 80.0);
-        assert_eq!(b, Bottleneck::ClockUnderspeed);
+    fn breakdown_driven_bottlenecks() {
+        let m = mfu(30.0, false);
+        let b = bd(20.0, 0.0, 0.0);
+        assert_eq!(
+            BottleneckDetector::detect(&input(&m, &b)),
+            Bottleneck::DataLoader
+        );
+        let b = bd(0.0, 12.0, 0.0);
+        assert_eq!(
+            BottleneckDetector::detect(&input(&m, &b)),
+            Bottleneck::SyncStall
+        );
+        let b = bd(0.0, 0.0, 20.0);
+        assert_eq!(
+            BottleneckDetector::detect(&input(&m, &b)),
+            Bottleneck::MemoryBound
+        );
     }
 
     #[test]
-    fn below_target_mfu_when_no_specific_bottleneck() {
-        let b =
-            BottleneckDetector::detect(&mfu(30.0), &breakdown(5.0, 2.0, 1.0), false, false, 95.0);
-        assert_eq!(b, Bottleneck::BelowTargetMfu);
+    fn clock_underspeed_only_when_busy_and_unexplained() {
+        let (m, b) = (mfu(60.0, false), bd(0.0, 0.0, 0.0));
+        let mut i = input(&m, &b);
+        i.clock_pct_of_boost = Some(70.0);
+        assert_eq!(BottleneckDetector::detect(&i), Bottleneck::ClockUnderspeed);
+        i.busy_pct = Some(20.0);
+        assert_ne!(BottleneckDetector::detect(&i), Bottleneck::ClockUnderspeed);
     }
 
     #[test]
-    fn thermal_overrides_data_loader() {
-        // Even when data loader is high, thermal takes priority.
-        let b =
-            BottleneckDetector::detect(&mfu(10.0), &breakdown(50.0, 0.0, 0.0), true, false, 95.0);
-        assert_eq!(b, Bottleneck::ThermalThrottle);
+    fn upper_bound_above_target_is_unverified_not_well_optimized() {
+        let (m, b) = (mfu(97.0, true), bd(0.0, 0.0, 0.0));
+        assert_eq!(
+            BottleneckDetector::detect(&input(&m, &b)),
+            Bottleneck::Unverified
+        );
+        let m = mfu(30.0, true);
+        assert_eq!(
+            BottleneckDetector::detect(&input(&m, &b)),
+            Bottleneck::BelowTargetMfu,
+            "an upper bound below target proves the job is below target"
+        );
     }
 
     #[test]
-    fn data_loader_overrides_cuda_sync() {
-        // data_loader_pct=20 and cuda_sync_pct=12 — data loader should win.
-        let b =
-            BottleneckDetector::detect(&mfu(20.0), &breakdown(20.0, 12.0, 1.0), false, false, 95.0);
-        assert_eq!(b, Bottleneck::DataLoader);
+    fn healthy_measured_job_is_none() {
+        let (m, b) = (mfu(55.0, false), bd(2.0, 1.0, 0.0));
+        assert_eq!(BottleneckDetector::detect(&input(&m, &b)), Bottleneck::None);
+    }
+
+    #[test]
+    fn custom_target_is_respected() {
+        let (m, b) = (mfu(50.0, false), bd(0.0, 0.0, 0.0));
+        let mut i = input(&m, &b);
+        i.target_mfu = 60.0;
+        assert_eq!(BottleneckDetector::detect(&i), Bottleneck::BelowTargetMfu);
     }
 }

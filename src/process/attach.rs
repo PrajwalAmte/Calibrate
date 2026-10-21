@@ -1,121 +1,101 @@
-#[cfg(target_os = "linux")]
-use std::path::Path;
-
+use crate::collectors::proc_tree;
 use crate::error::CalibrateError;
 
-/// Details about a successfully attached training process.
+/// Details about a successfully attached target process.
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
-    #[allow(dead_code)]
-    pub pid: u32,
-    /// NVML device indices the process is actively using.
-    pub gpu_indices: Vec<u32>,
-    /// Human-readable name of the primary GPU (e.g. "NVIDIA GeForce RTX 3090").
-    pub primary_gpu_name: String,
-    /// Whether the tool itself is running inside a container.
     pub container_context: ContainerContext,
-    /// Whether NVML was successfully initialised.  False on non-NVIDIA systems
-    /// or when the nvidia driver is not loaded.  GPU metrics will be absent.
-    pub nvml_available: bool,
+    /// Non-fatal problems to show the user (e.g. no GPU context yet).
+    pub warnings: Vec<String>,
 }
 
 /// Result of container-environment detection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContainerContext {
-    /// Running on the host — full /proc access expected.
     Host,
-    /// Running inside Docker.
     Docker,
-    /// Running inside Kubernetes (Docker or containerd runtime).
     Kubernetes,
-    /// Container runtime detected but type unknown.
+    /// A container runtime was detected but its type is unknown.
     Unknown,
 }
 
-/// Validate that `pid` exists, is a GPU process, and return structured info.
+/// Validate that `pid` exists and is observable.
 ///
-/// Fails fast with actionable errors rather than silently producing empty metrics.
+/// A process that has not created a GPU context yet is *not* an error — jobs
+/// often spend their first minute loading data. That situation is reported
+/// as a warning and shown live instead.
 pub fn attach(pid: u32) -> Result<ProcessInfo, CalibrateError> {
-    //  Process liveness check (platform-specific)
-    #[cfg(target_os = "linux")]
-    {
-        let proc_path = format!("/proc/{pid}");
-        if !Path::new(&proc_path).exists() {
-            let ctx = crate::process::container::detect();
-            if ctx != ContainerContext::Host {
-                return Err(CalibrateError::ContainerPidIsolation { pid });
-            }
-            return Err(CalibrateError::ProcessNotFound { pid });
-        }
-        let stat_path = format!("/proc/{pid}/stat");
-        std::fs::metadata(&stat_path).map_err(|_| CalibrateError::PermissionDenied { pid })?;
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    if !posix_pid_exists(pid) {
-        return Err(CalibrateError::ProcessNotFound { pid });
-    }
-
-    //  GPU detection (platform-specific)
-    #[cfg(target_os = "linux")]
-    let (gpu_indices, primary_gpu_name, nvml_available) = {
-        match find_gpu_indices(pid) {
-            Ok((indices, name)) => (indices, name, true),
-            Err(CalibrateError::NvmlInit(_) | CalibrateError::NvmlUnavailable) => (
-                vec![],
-                "Unknown (non-NVIDIA GPU or missing driver)".to_string(),
-                false,
-            ),
-            Err(e) => return Err(e),
-        }
-    };
-
-    #[cfg(target_os = "linux")]
-    if nvml_available && gpu_indices.is_empty() {
-        return Err(CalibrateError::NoGpuProcess { pid });
-    }
-
-    #[cfg(target_os = "macos")]
-    let (gpu_indices, primary_gpu_name, nvml_available) = {
-        let gpu_available = crate::collectors::apple_gpu::AppleGpuCollector::probe().is_ok();
-        (vec![], apple_gpu_name(), gpu_available)
-    };
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let (gpu_indices, primary_gpu_name, nvml_available): (Vec<u32>, String, bool) =
-        (vec![], "Unknown GPU".to_string(), false);
-
     let container_context = crate::process::container::detect();
+    if !proc_tree::is_alive(pid) {
+        return Err(if container_context != ContainerContext::Host {
+            CalibrateError::ContainerPidIsolation { pid }
+        } else {
+            CalibrateError::ProcessNotFound { pid }
+        });
+    }
+
+    let mut warnings = Vec::new();
+    if crate::collectors::cpu::process_cpu_ns(pid).is_none() {
+        #[cfg(target_os = "linux")]
+        return Err(CalibrateError::PermissionDenied { pid });
+        #[cfg(not(target_os = "linux"))]
+        warnings.push(format!(
+            "cannot read CPU usage of PID {pid} (owned by another user?) — run with sudo for \
+             CPU and input-pipeline analysis"
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    gpu_presence_warnings(pid, container_context, &mut warnings);
 
     Ok(ProcessInfo {
-        pid,
-        gpu_indices,
-        primary_gpu_name,
         container_context,
-        nvml_available,
+        warnings,
     })
 }
 
-/// Returns `true` if `pid` is alive and visible to the current user.
-///
-/// Uses POSIX `kill(pid, 0)`, which succeeds without sending a signal when
-/// the process exists.  Used on platforms where `/proc` is absent.
-#[cfg(not(target_os = "linux"))]
-fn posix_pid_exists(pid: u32) -> bool {
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+/// Warn when no process of the tree holds a GPU context, with a specific hint
+/// when NVML's PIDs are not visible here (container PID namespace).
+#[cfg(target_os = "linux")]
+fn gpu_presence_warnings(pid: u32, ctx: ContainerContext, warnings: &mut Vec<String>) {
+    let Ok(backend) = crate::collectors::nvml::NvmlBackend::new(
+        crate::cli::MetricsSource::Nvml,
+        std::time::Duration::from_secs(1),
+    ) else {
+        return;
+    };
+    let tree = proc_tree::descendants(pid);
+    if !backend
+        .devices_for_pids(&tree)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return;
+    }
+    let gpu_pids = backend.all_gpu_pids();
+    let invisible = !gpu_pids.is_empty() && gpu_pids.iter().all(|p| !proc_tree::is_alive(*p));
+    if invisible || ctx != ContainerContext::Host {
+        warnings.push(format!(
+            "PID {pid} is not listed on any GPU, and the GPU's process IDs are not visible in \
+             this PID namespace (container). Use `--gpus all` to monitor the devices directly, \
+             or run calibrate on the host / with hostPID."
+        ));
+    } else {
+        warnings.push(format!(
+            "PID {pid} and its children have no GPU context yet — waiting for the job to start \
+             using a GPU"
+        ));
+    }
 }
 
-/// Reads the Apple Silicon chip brand via `sysctl machdep.cpu.brand_string`
-/// and appends " GPU" (e.g. "Apple M3 Max GPU").
-///
-/// Falls back to "Apple GPU" on any sysctl failure.
+/// Apple chip brand (`machdep.cpu.brand_string`) + " GPU", e.g. "Apple M3 Max GPU".
 #[cfg(target_os = "macos")]
-fn apple_gpu_name() -> String {
+pub fn apple_gpu_name() -> String {
     let mut buf = [0u8; 256];
     let mut len = buf.len();
     let ret = unsafe {
         libc::sysctlbyname(
-            b"machdep.cpu.brand_string\0".as_ptr() as *const libc::c_char,
+            c"machdep.cpu.brand_string".as_ptr(),
             buf.as_mut_ptr() as *mut libc::c_void,
             &mut len,
             std::ptr::null_mut(),
@@ -124,7 +104,7 @@ fn apple_gpu_name() -> String {
     };
     if ret == 0 && len > 1 {
         let s = std::str::from_utf8(&buf[..len - 1])
-            .unwrap_or("Apple GPU")
+            .unwrap_or("Apple")
             .trim()
             .to_string();
         format!("{s} GPU")
@@ -133,123 +113,44 @@ fn apple_gpu_name() -> String {
     }
 }
 
-/// Use NVML to enumerate all devices and return those that have the target
-/// PID in their running-compute-processes list.
-#[cfg(target_os = "linux")]
-fn find_gpu_indices(pid: u32) -> Result<(Vec<u32>, String), CalibrateError> {
-    let nvml = nvml_wrapper::Nvml::init().map_err(|e| CalibrateError::NvmlInit(e.to_string()))?;
-
-    let device_count = nvml
-        .device_count()
-        .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-    let mut indices = Vec::new();
-    let mut primary_name = String::from("Unknown GPU");
-
-    for i in 0..device_count {
-        let device = nvml
-            .device_by_index(i)
-            .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-        let processes = device
-            .running_compute_processes()
-            .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-        if processes.iter().any(|p| p.pid == pid) {
-            if indices.is_empty() {
-                primary_name = device.name().unwrap_or_else(|_| "Unknown GPU".to_string());
-            }
-            indices.push(i);
-        }
-    }
-
-    Ok((indices, primary_name))
-}
-
-//  Tests
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Helper: a PID that can never exist on Linux (max is typically 4_194_304).
+    // A PID that can never exist (Linux max is 4_194_304; macOS 99_999).
     const NONEXISTENT_PID: u32 = 4_000_001;
 
     #[test]
-    fn nonexistent_pid_returns_process_not_found() {
-        // We are running on the host (CI or developer machine), so
-        // the container detection will return Host, giving ProcessNotFound.
-        // If this test runs inside a container the error will be
-        // ContainerPidIsolation instead; both are acceptable.
-        let result = attach(NONEXISTENT_PID);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            CalibrateError::ProcessNotFound { pid } => {
-                assert_eq!(pid, NONEXISTENT_PID);
+    fn nonexistent_pid_is_an_actionable_error() {
+        match attach(NONEXISTENT_PID).unwrap_err() {
+            CalibrateError::ProcessNotFound { pid }
+            | CalibrateError::ContainerPidIsolation { pid } => {
+                assert_eq!(pid, NONEXISTENT_PID)
             }
-            CalibrateError::ContainerPidIsolation { .. } => {
-                // Also acceptable: test is running inside a container.
-            }
-            other => panic!("unexpected error for nonexistent PID: {other:?}"),
+            other => panic!("unexpected error {other:?}"),
         }
     }
 
     #[test]
-    fn process_not_found_error_message_is_actionable() {
-        let err = CalibrateError::ProcessNotFound { pid: 99999 };
-        let msg = err.to_string();
-        assert!(
-            msg.contains("99999"),
-            "error message should contain the PID: {msg}"
-        );
-        assert!(
-            msg.contains("running"),
-            "error message should mention whether process is running: {msg}"
-        );
+    fn own_process_attaches() {
+        attach(std::process::id()).expect("self attach");
     }
 
     #[test]
-    fn container_isolation_error_includes_docker_exec_hint() {
-        let err = CalibrateError::ContainerPidIsolation { pid: 12345 };
-        let msg = err.to_string();
-        assert!(msg.contains("docker"), "should mention docker: {msg}");
-        assert!(msg.contains("kubectl"), "should mention kubectl: {msg}");
-        assert!(msg.contains("12345"), "should include the PID: {msg}");
-    }
-
-    #[test]
-    fn permission_denied_error_mentions_sudo() {
-        let err = CalibrateError::PermissionDenied { pid: 7 };
-        let msg = err.to_string();
+    fn error_messages_are_actionable() {
+        let msg = CalibrateError::ProcessNotFound { pid: 99999 }.to_string();
+        assert!(msg.contains("pgrep"), "{msg}");
+        let msg = CalibrateError::PermissionDenied { pid: 1 }.to_string();
+        assert!(msg.contains("sudo"), "{msg}");
+        let msg = CalibrateError::ContainerPidIsolation { pid: 7 }.to_string();
         assert!(
-            msg.contains("sudo") || msg.contains("permission") || msg.contains("insufficient"),
-            "error should mention privilege escalation: {msg}"
+            msg.contains("docker exec") && msg.contains("--gpus all"),
+            "{msg}"
         );
-    }
-
-    #[test]
-    fn nvml_init_error_mentions_driver() {
-        let err = CalibrateError::NvmlInit("library not found".to_string());
-        let msg = err.to_string();
+        let msg = CalibrateError::NvmlInit("x".into()).to_string();
         assert!(
-            msg.contains("nvidia") || msg.contains("driver") || msg.contains("nvidia-smi"),
-            "NVML init error should mention the driver: {msg}"
+            msg.contains("modprobe") && msg.contains("calibrate diagnose"),
+            "{msg}"
         );
-    }
-
-    #[test]
-    fn nvml_unavailable_error_is_descriptive() {
-        let err = CalibrateError::NvmlUnavailable;
-        let msg = err.to_string();
-        assert!(
-            msg.contains("NVML") || msg.contains("non-NVIDIA"),
-            "error should mention NVML or non-NVIDIA: {msg}"
-        );
-    }
-
-    #[test]
-    fn container_context_detect_returns_a_value() {
-        // Only verifies the function runs without panicking.
-        let _ctx = crate::process::container::detect();
     }
 }

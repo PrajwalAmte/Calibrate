@@ -2,137 +2,72 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 
 use crate::cli::ProbeArgs;
-#[cfg(target_os = "linux")]
-use crate::collectors::nvml::NvmlCollector;
-#[cfg(target_os = "linux")]
-use crate::collectors::proc::ProcCollector;
-use crate::collectors::MetricsCollector;
-#[cfg(target_os = "linux")]
-use crate::metrics::units::Percent;
+use crate::collectors::hook;
+use crate::collectors::runner::{self, RunnerConfig, Target};
 use crate::process::attach;
 
-/// Entry point for `calibrate probe`.
-///
-/// Validates that the collector pipeline is functioning end-to-end by:
-///   1. Attaching to the given process and printing what we found
-///   2. Streaming `--count` raw `RawSample` JSON objects to stdout, one per line
-///   3. Exiting cleanly
-///
-/// This is the primary verification tool for Phase 2.  Run it against any
-/// live GPU process to confirm that RawSamples arrive with all fields
-/// (including `cpu_utilization`) populated.
-pub async fn run(args: ProbeArgs) -> anyhow::Result<()> {
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    anyhow::bail!(
-        "calibrate probe requires Linux (NVIDIA) or macOS (Apple GPU).\n\
-         `calibrate bench` and `calibrate plan` are available on all platforms."
-    );
-
-    // GPU backend availability check
-    #[cfg(target_os = "linux")]
-    NvmlCollector::probe().context(
-        "NVML unavailable — is the NVIDIA driver installed and are you running as a user \
-         with GPU access?",
-    )?;
-
-    // Attach to the process
-    let process_info = attach::attach(args.pid).context("Failed to attach to training process")?;
-
-    eprintln!("Attached to PID {}", args.pid);
-    eprintln!("  Primary GPU : {}", process_info.primary_gpu_name);
-    eprintln!("  GPU indices : {:?}", process_info.gpu_indices);
-    eprintln!("  Container   : {:?}", process_info.container_context);
-    eprintln!();
-
-    let n = args.count;
-    let interval = Duration::from_secs_f64(args.interval);
-    eprintln!(
-        "Streaming {} RawSample(s) at {:.1}s intervals (JSON, one per line)...",
-        n, args.interval
-    );
-    eprintln!();
-
-    // Set up shared state
-    let stop = Arc::new(AtomicBool::new(false));
-
-    let (tx, rx) = flume::bounded::<crate::collectors::RawSample>(64);
-
-    // Spawn collector (platform-specific)
-    #[cfg(target_os = "linux")]
-    {
-        let shared_cpu: Arc<parking_lot::Mutex<Percent>> =
-            Arc::new(parking_lot::Mutex::new(Percent(0.0)));
-
-        std::thread::Builder::new()
-            .name("proc-collector".to_string())
-            .spawn({
-                let shared_cpu = shared_cpu.clone();
-                let stop = stop.clone();
-                let pid = args.pid;
-                move || ProcCollector::run_background(pid, shared_cpu, stop, interval)
-            })
-            .context("Failed to spawn ProcCollector thread")?;
-
-        let nvml_collector = NvmlCollector::new(args.pid, interval, shared_cpu);
-        std::thread::Builder::new()
-            .name("nvml-collector".to_string())
-            .spawn({
-                let stop = stop.clone();
-                move || nvml_collector.run(tx, stop)
-            })
-            .context("Failed to spawn NVML collector thread")?;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        use crate::collectors::apple_gpu::AppleGpuCollector;
-        let collector = AppleGpuCollector::new(args.pid, interval);
-        std::thread::Builder::new()
-            .name("apple-gpu-collector".to_string())
-            .spawn({
-                let stop = stop.clone();
-                move || collector.run(tx, stop)
-            })
-            .context("Failed to spawn Apple GPU collector thread")?;
-    }
-
-    // Collect N samples
-    let mut received: u32 = 0;
-    while received < n {
-        match rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(sample) => {
-                let json =
-                    serde_json::to_string(&sample).context("Failed to serialize RawSample")?;
-                println!("{json}");
-                received += 1;
+/// Entry point for `calibrate probe`: stream raw ticks as JSON so the
+/// collector pipeline can be verified on a new machine.
+pub async fn run(args: ProbeArgs) -> Result<()> {
+    let target = match (args.pid, args.gpus.clone()) {
+        (Some(pid), _) => {
+            let info = attach::attach(pid).context("Failed to attach to process")?;
+            for w in &info.warnings {
+                eprintln!("[calibrate] {w}");
             }
-            Err(flume::RecvTimeoutError::Timeout) => {
-                eprintln!(
-                    "Timeout waiting for sample {}/{} — is the process actively using the GPU?",
-                    received + 1,
-                    n
-                );
-            }
-            Err(flume::RecvTimeoutError::Disconnected) => {
-                eprintln!("Collector thread exited unexpectedly");
-                break;
+            Target::Process {
+                root: pid,
+                include_children: true,
             }
         }
-    }
+        (None, Some(sel)) => Target::Devices(sel),
+        (None, None) => unreachable!("clap requires --pid or --gpus"),
+    };
 
-    // Clean up
+    let stop = Arc::new(AtomicBool::new(false));
+    let (rx, info) = runner::spawn(
+        RunnerConfig {
+            target,
+            interval: Duration::from_secs_f64(args.interval),
+            metrics_source: args.metrics_source,
+            hook_dir: hook::default_dir(),
+        },
+        stop.clone(),
+    )?;
+    eprintln!(
+        "backend: {}  •  metrics source: {}  •  scope: {:?}",
+        info.backend, info.metrics_source, info.scope
+    );
+    for w in &info.warnings {
+        eprintln!("[calibrate] {w}");
+    }
+    eprintln!(
+        "Streaming {} tick(s) at {:.1}s intervals (JSON, one per line)...",
+        args.count, args.interval
+    );
+
+    let mut received = 0u32;
+    let timeout = Duration::from_secs_f64(args.interval * 3.0 + 5.0);
+    while received < args.count {
+        match tokio::time::timeout(timeout, rx.recv_async()).await {
+            Ok(Ok(tick)) => {
+                println!("{}", serde_json::to_string(&tick)?);
+                received += 1;
+            }
+            Ok(Err(_)) => {
+                eprintln!("Collector stopped (target exited?)");
+                break;
+            }
+            Err(_) => eprintln!("No sample within {timeout:?} — still waiting…"),
+        }
+    }
     stop.store(true, Ordering::Relaxed);
-
-    if received == n {
-        eprintln!();
-        eprintln!("Done — {received} sample(s) received successfully.");
-    } else {
-        eprintln!();
-        eprintln!("Received {received}/{n} sample(s) before stopping.");
+    eprintln!("Received {received}/{} tick(s).", args.count);
+    if received == 0 {
+        anyhow::bail!("no samples were collected");
     }
-
     Ok(())
 }

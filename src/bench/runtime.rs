@@ -6,6 +6,40 @@ use anyhow::Result;
 use crate::bench::input::{BenchInput, ModelFormat};
 use crate::bench::SkippedRuntime;
 
+/// Iteration counts and limits passed to runtimes that measure internally.
+#[derive(Debug, Clone)]
+pub struct SubprocessSettings {
+    pub warmup: u32,
+    pub iterations: u32,
+    pub throughput_window: Duration,
+    /// Hard limit for one (runtime, batch) subprocess.
+    pub timeout: Duration,
+    /// Sequence length for token-input models.
+    pub seq_len: usize,
+    /// Input dimensions after the batch dimension (`--input-shape`); `None` = infer.
+    pub input_shape: Option<Vec<usize>>,
+}
+
+impl Default for SubprocessSettings {
+    fn default() -> Self {
+        Self {
+            warmup: 20,
+            iterations: 100,
+            throughput_window: Duration::from_secs(5),
+            timeout: Duration::from_secs(600),
+            seq_len: 512,
+            input_shape: None,
+        }
+    }
+}
+
+/// Peak memory measured by the runtime itself (inside its own process).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReportedMemory {
+    pub rss_mib: f64,
+    pub device_mib: Option<f64>,
+}
+
 /// Object-safe trait implemented by each inference runtime backend.
 ///
 /// The harness owns all timing and memory measurement; runtimes are
@@ -51,6 +85,20 @@ pub trait Runtime: Send {
     fn pre_collected_samples(&mut self) -> Option<(Vec<u64>, f64, u64)> {
         None
     }
+
+    /// Receive iteration counts / limits before `load()`.
+    fn configure(&mut self, _settings: &SubprocessSettings) {}
+
+    /// Peak memory the runtime measured in its own process, if any.
+    fn reported_memory(&mut self) -> Option<ReportedMemory> {
+        None
+    }
+
+    /// True for kernel microbenchmarks that do not run the model; such
+    /// results are labelled and never recommended.
+    fn synthetic(&self) -> bool {
+        false
+    }
 }
 
 /// Static descriptor for a runtime.
@@ -67,6 +115,8 @@ pub struct RuntimeDescriptor {
     pub is_compatible: fn(ModelFormat) -> bool,
     /// Construct a boxed runtime instance ready to receive `load()` calls.
     pub create: fn() -> Box<dyn Runtime>,
+    /// Only run when requested by name with `--runtimes`.
+    pub opt_in: bool,
 }
 
 /// Build the list of runtime instances to benchmark.
@@ -83,14 +133,16 @@ pub fn build_runtime_list(
     let mut skipped: Vec<SkippedRuntime> = Vec::new();
 
     for descriptor in &registry {
-        // If the user named specific runtimes, skip anything not in the list.
-        if let Some(names) = requested {
-            if !names
+        // If the user named specific runtimes, skip anything not in the list;
+        // opt-in runtimes run only when named.
+        let named = requested.is_some_and(|names| {
+            names
                 .iter()
                 .any(|n| n.eq_ignore_ascii_case(descriptor.name))
-            {
-                continue;
-            }
+        });
+        let selected = named || (requested.is_none() && !descriptor.opt_in);
+        if !selected {
+            continue;
         }
 
         if !(descriptor.is_available)() {

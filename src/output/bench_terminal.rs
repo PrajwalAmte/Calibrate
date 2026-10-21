@@ -18,7 +18,7 @@ pub fn render(report: &BenchReport) -> Result<()> {
     // Column widths.
     let runtime_w = results
         .iter()
-        .map(|r| r.runtime.len())
+        .map(|r| display_name(r).len())
         .max()
         .unwrap_or(7)
         .max(7);
@@ -79,7 +79,7 @@ pub fn render(report: &BenchReport) -> Result<()> {
                 format!("{:.1}ms", result.stats.p50_ms),
                 format!("{:.1}ms", result.stats.p99_ms),
                 format!("{:.0} req/s", result.stats.throughput_rps),
-                format!("{:.0} MiB", result.peak_memory_mib),
+                fmt_mem(result.peak_memory_mib, &result.memory_source),
             )
         };
 
@@ -87,7 +87,7 @@ pub fn render(report: &BenchReport) -> Result<()> {
             "{}{} {:<rw$}  {:>5}  {:>9}  {:>9}  {:>12}  {:>10}",
             marker,
             flag,
-            result.runtime,
+            display_name(result),
             result.batch_size,
             p50,
             p99,
@@ -99,6 +99,14 @@ pub fn render(report: &BenchReport) -> Result<()> {
 
     println!();
 
+    if report.results.iter().any(|r| r.synthetic) {
+        println!(
+            "  (synthetic) kernel microbenchmark — does not run the model; never recommended."
+        );
+    }
+    if report.results.iter().any(|r| r.memory_source == "host_rss") {
+        println!("  Memory marked (host) is the runtime process's peak RSS (CPU inference).");
+    }
     if any_unreliable {
         println!("  * High variance detected — results may be unreliable.");
         println!("    Stop other processes and re-run for accurate measurements.");
@@ -109,6 +117,22 @@ pub fn render(report: &BenchReport) -> Result<()> {
     print_skipped(report);
 
     Ok(())
+}
+
+pub(crate) fn display_name(r: &crate::bench::BenchResult) -> String {
+    if r.synthetic {
+        format!("{} (synthetic)", r.runtime)
+    } else {
+        r.runtime.clone()
+    }
+}
+
+pub(crate) fn fmt_mem(mib: f64, source: &str) -> String {
+    match source {
+        "none" | "" if mib <= 0.0 => "n/a".into(),
+        "host_rss" => format!("{mib:.0} MiB (host)"),
+        _ => format!("{mib:.0} MiB"),
+    }
 }
 
 fn print_recommendation(report: &BenchReport) {

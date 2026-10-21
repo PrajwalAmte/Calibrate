@@ -1,117 +1,93 @@
-use crate::output::OutputRenderer;
+use crate::metrics::units::{fmt_hms, fmt_mib, fmt_opt, fmt_pct, fmt_temp, fmt_usd};
 use crate::session::state::SessionSnapshot;
 
-/// Prints a final session summary to stdout after the run ends.
+/// End-of-session summary printed after the TUI exits.
 pub struct SummaryReport;
 
 impl SummaryReport {
-    pub fn print(snapshot: &SessionSnapshot) {
-        let elapsed = snapshot.elapsed;
-        let h = elapsed.as_secs() / 3600;
-        let m = (elapsed.as_secs() % 3600) / 60;
-        let s = elapsed.as_secs() % 60;
-
-        println!();
-        println!("calibrate watch — Session Summary");
-
-        if !snapshot.nvml_available {
-            println!("  ⚠  NVML unavailable — GPU metrics were not collected.");
-            println!("     CPU utilisation is shown; MFU is not available.");
-            println!();
+    pub fn render(s: &SessionSnapshot) -> String {
+        let mut out = String::new();
+        let mut line = |l: String| {
+            out.push_str(&l);
+            out.push('\n');
+        };
+        line(String::new());
+        line("calibrate watch — session summary".into());
+        line(format!("  GPU              : {}", s.gpu_name));
+        line(format!(
+            "  Duration         : {}   ({} samples, source: {})",
+            fmt_hms(s.elapsed_secs),
+            s.ticks_observed,
+            s.metrics_source
+        ));
+        let bound = if s.mfu.upper_bound { "≤ " } else { "" };
+        line(format!(
+            "  {:<17}: {}{}  (target ≥{:.0}%)",
+            s.mfu.source.label(),
+            bound,
+            fmt_pct(s.mfu.mfu_pct),
+            s.target_mfu_pct
+        ));
+        if let Some(p) = &s.mfu_percentiles {
+            line(format!(
+                "  p50 / p75 / p95  : {:.1}% / {:.1}% / {:.1}%   (peak {})",
+                p.p50,
+                p.p75,
+                p.p95,
+                fmt_pct(s.peak_mfu_pct)
+            ));
         }
-
-        println!("  GPU              : {}", snapshot.gpu_name);
-        println!("  Duration         : {:02}:{:02}:{:02}", h, m, s);
-        println!("  Steps observed   : {}", snapshot.steps_observed);
-        println!();
-
-        if snapshot.nvml_available {
-            println!(
-                "  MFU              : {:.1}%  (target: >45%)",
-                snapshot.mfu.mfu_pct.0
-            );
-            println!("  Peak MFU         : {:.1}%", snapshot.peak_mfu_pct);
-            if let Some(ref p) = snapshot.mfu_percentiles {
-                println!(
-                    "  MFU p50/p75/p95  : {:.1}% / {:.1}% / {:.1}%",
-                    p.p50, p.p75, p.p95
-                );
+        if let Some(st) = &s.steps {
+            line(format!(
+                "  Step time        : {:.0} ms mean, {:.0} ms p95{}",
+                st.mean_ms,
+                st.p95_ms,
+                if st.erratic { "  (erratic)" } else { "" }
+            ));
+            if let Some(t) = st.tokens_per_sec {
+                line(format!("  Throughput       : {t:.0} tokens/s"));
             }
-            println!(
-                "  Peak VRAM        : {} / {}",
-                snapshot.peak_vram_mib, snapshot.vram_total_mib
-            );
         }
-
-        println!("  Temperature      : {}", snapshot.temperature);
-        println!();
-
-        if elapsed.as_secs() < 30 {
-            println!("  ⚠  Run was under 30 seconds — MFU estimate is approximate.");
-            println!();
+        for g in &s.gpus {
+            line(format!(
+                "  GPU{:<2} peak VRAM  : {} / {}   temp {}",
+                g.index,
+                fmt_opt(g.peak_vram_mib, fmt_mib),
+                fmt_opt(g.vram_total_mib, fmt_mib),
+                fmt_temp(g.temperature_c)
+            ));
         }
-
-        if snapshot.mfu_divergent {
-            println!(
-                "  ⚠  GPU MFU divergence: {:.0} ppt spread across devices.",
-                snapshot.gpu_mfu_divergence_ppt
-            );
-            println!("     Check NCCL/DDP configuration and per-card thermal limits.");
-            println!();
+        if s.elapsed_secs < 30.0 {
+            line("  ⚠  Session under 30 s — figures are approximate.".into());
         }
-
-        if snapshot.vram_growing {
-            println!("  ⚠  VRAM was growing every tick — possible memory leak in training loop.");
-            println!("     Check for tensors accumulating outside torch.no_grad() or in lists.");
-            println!();
+        if s.gpu_divergent {
+            line(format!(
+                "  ⚠  GPU utilisation diverged by {:.0} ppt across devices.",
+                s.gpu_divergence_ppt.unwrap_or(0.0)
+            ));
         }
-
-        if snapshot.step_time_ms_mean > 0.0 {
-            let erratic_note = if snapshot.step_time_erratic {
-                "  ← ERRATIC (CV > 0.3 — check data loader or memory allocation)"
-            } else {
-                ""
-            };
-            println!(
-                "  Step time (mean)   : {:.0} ms{}",
-                snapshot.step_time_ms_mean, erratic_note
-            );
-            println!();
+        if s.vram_growing {
+            line("  ⚠  GPU memory grew steadily — check for tensors kept across steps.".into());
         }
-
-        if snapshot.per_gpu.len() > 1 {
-            println!("  Per-GPU breakdown:");
-            for g in &snapshot.per_gpu {
-                println!(
-                    "    GPU{}: SM {:.1}%  VRAM {}  Temp {}",
-                    g.gpu_index, g.sm_utilization.0, g.vram_used_mib, g.temperature
-                );
-            }
-            println!();
+        for w in &s.warnings {
+            line(format!("  ⚠  {w}"));
         }
-
-        println!("  Primary bottleneck : {:?}", snapshot.bottleneck);
-        println!("  Recommendation     : {}", snapshot.recommendation.action);
-        println!();
-
-        if let Some(ref cost) = snapshot.cost_impact {
-            println!(
-                "  Waste per hour   : ${:.2}  (at ${:.2}/hr)",
-                cost.waste_per_hour, cost.cost_per_hour
-            );
-            println!();
+        line(format!("  Primary finding  : {}", s.recommendation.title));
+        line(format!("  Recommendation   : {}", s.recommendation.action));
+        if let Some(c) = &s.cost {
+            let lb = if c.is_lower_bound { "≥ " } else { "" };
+            line(format!(
+                "  Cost             : {} spent, {lb}{} below target ({lb}{}/hr at ${:.2}/hr)",
+                fmt_usd(c.spent_usd),
+                fmt_usd(c.wasted_usd),
+                fmt_usd(c.waste_per_hour),
+                c.cost_per_hour
+            ));
         }
-    }
-}
-
-impl OutputRenderer for SummaryReport {
-    fn render(&mut self, _snapshot: &SessionSnapshot) {
-        // Summary only outputs at the end.
+        out
     }
 
-    fn finish(&mut self, snapshot: Option<&SessionSnapshot>) {
-        if let Some(s) = snapshot {
-            Self::print(s);
-        }
+    pub fn print(s: &SessionSnapshot) {
+        print!("{}", Self::render(s));
     }
 }

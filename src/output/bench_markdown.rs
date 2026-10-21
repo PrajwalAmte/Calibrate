@@ -32,9 +32,9 @@ pub fn render(report: &BenchReport) -> String {
                 .unwrap_or(false);
 
             let name = if is_rec {
-                format!("**{}** ✓", r.runtime)
+                format!("**{}** ✓", crate::output::bench_terminal::display_name(r))
             } else {
-                r.runtime.clone()
+                crate::output::bench_terminal::display_name(r)
             };
 
             let (p50, p99, tput, mem) = if r.oom {
@@ -49,7 +49,7 @@ pub fn render(report: &BenchReport) -> String {
                     format!("{:.1}ms", r.stats.p50_ms),
                     format!("{:.1}ms", r.stats.p99_ms),
                     format!("{:.0} req/s", r.stats.throughput_rps),
-                    format!("{:.0} MiB", r.peak_memory_mib),
+                    crate::output::bench_terminal::fmt_mem(r.peak_memory_mib, &r.memory_source),
                 )
             };
 

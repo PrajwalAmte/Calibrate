@@ -1,0 +1,11 @@
+{"calibrate_trace": 1, "calibrate_version": "0.2.0", "backend": "none", "metrics_source": "none", "scope": "none", "interval_secs": 2.0}
+{"timestamp_ms": 1760000000000, "scope": "none", "gpus": [], "cpu_pct": 120.0, "process_count": 5, "steps": [], "hook_peers": []}
+{"timestamp_ms": 1760000002000, "scope": "none", "gpus": [], "cpu_pct": 120.0, "process_count": 5, "steps": [], "hook_peers": []}
+{"timestamp_ms": 1760000004000, "scope": "none", "gpus": [], "cpu_pct": 120.0, "process_count": 5, "steps": [], "hook_peers": []}
+{"timestamp_ms": 1760000006000, "scope": "none", "gpus": [], "cpu_pct": 120.0, "process_count": 5, "steps": [], "hook_peers": []}
+{"timestamp_ms": 1760000008000, "scope": "none", "gpus": [], "cpu_pct": 120.0, "process_count": 5, "steps": [], "hook_peers": []}
+{"timestamp_ms": 1760000010000, "scope": "none", "gpus": [], "cpu_pct": 120.0, "process_count": 5, "steps": [], "hook_peers": []}
+{"timestamp_ms": 1760000012000, "scope": "none", "gpus": [], "cpu_pct": 120.0, "process_count": 5, "steps": [], "hook_peers": []}
+{"timestamp_ms": 1760000014000, "scope": "none", "gpus": [], "cpu_pct": 120.0, "process_count": 5, "steps": [], "hook_peers": []}
+{"timestamp_ms": 1760000016000, "scope": "none", "gpus": [], "cpu_pct": 120.0, "process_count": 5, "steps": [], "hook_peers": []}
+{"timestamp_ms": 1760000018000, "scope": "none", "gpus": [], "cpu_pct": 120.0, "process_count": 5, "steps": [], "hook_peers": []}

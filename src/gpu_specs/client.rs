@@ -1,42 +1,33 @@
+//! Remote GPU spec database with an on-disk cache.
+//!
+//! The remote file has the same format as `assets/fallback_specs.json`. It is
+//! fetched at most once per day; after a failed attempt calibrate waits six
+//! hours before retrying, so firewalled clusters do not pay a timeout on every
+//! run. `--offline` (or `[general] offline = true`) disables fetching
+//! entirely; `CALIBRATE_SPECS_URL` points at a mirror.
+
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::gpu_specs::{GpuSpec, SpecsRepository};
+use crate::gpu_specs::GpuSpec;
 
-/// URL of the canonical GPU spec JSON file.
-/// Point this at a raw GitHub URL in the calibrate project once published.
-const SPECS_URL: &str =
-    "https://raw.githubusercontent.com/your-org/calibrate/main/assets/gpu_specs.json";
-
-/// Cache TTL: re-fetch at most once per 24 hours.
 const CACHE_TTL_SECS: u64 = 86_400;
+const RETRY_AFTER_FAILURE_SECS: u64 = 6 * 3600;
+const FETCH_TIMEOUT: Duration = Duration::from_secs(3);
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct CacheFile {
+    #[serde(default)]
     fetched_at_unix: u64,
+    #[serde(default)]
+    last_attempt_unix: u64,
+    #[serde(default)]
+    source_url: String,
+    #[serde(default)]
     specs: Vec<GpuSpec>,
-}
-
-/// Loads GPU specs, using a local cache when fresh and fetching remotely when stale.
-pub struct HttpSpecsClient {
-    specs: Vec<GpuSpec>,
-}
-
-impl HttpSpecsClient {
-    /// Load specs synchronously — intended to be called via `tokio::task::spawn_blocking`.
-    pub fn load() -> Self {
-        let specs = load_specs_with_cache().unwrap_or_default();
-        Self { specs }
-    }
-}
-
-impl SpecsRepository for HttpSpecsClient {
-    fn get_by_name(&self, name: &str) -> Option<GpuSpec> {
-        crate::gpu_specs::find_best_match(&self.specs, name).cloned()
-    }
 }
 
 fn cache_path() -> Option<PathBuf> {
@@ -53,52 +44,60 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
-fn load_specs_with_cache() -> Option<Vec<GpuSpec>> {
-    let path = cache_path()?;
+fn read_cache(path: &PathBuf) -> Option<CacheFile> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
 
-    // Try cache first.
-    if path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            if let Ok(cache) = serde_json::from_str::<CacheFile>(&contents) {
-                let age = now_unix().saturating_sub(cache.fetched_at_unix);
-                if age < CACHE_TTL_SECS {
-                    tracing::debug!("GPU specs loaded from cache (age={age}s)");
-                    return Some(cache.specs);
-                }
-            }
-        }
-    }
-
-    // Fetch remotely.
-    match fetch_remote() {
-        Ok(specs) => {
-            let cache = CacheFile {
-                fetched_at_unix: now_unix(),
-                specs: specs.clone(),
-            };
-            if let Ok(json) = serde_json::to_string_pretty(&cache) {
-                let _ = std::fs::write(&path, json);
-            }
-            tracing::debug!("GPU specs fetched from remote and cached");
-            Some(specs)
-        }
-        Err(e) => {
-            tracing::warn!("Remote GPU spec fetch failed: {e}; using cache or fallback");
-            // Return stale cache if available rather than nothing.
-            if path.exists() {
-                if let Ok(contents) = std::fs::read_to_string(&path) {
-                    if let Ok(cache) = serde_json::from_str::<CacheFile>(&contents) {
-                        return Some(cache.specs);
-                    }
-                }
-            }
-            None
+fn write_cache(path: &PathBuf, cache: &CacheFile) {
+    if let Ok(json) = serde_json::to_string_pretty(cache) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
         }
     }
 }
 
-fn fetch_remote() -> Result<Vec<GpuSpec>, Box<dyn std::error::Error>> {
-    let response = reqwest::blocking::get(SPECS_URL)?;
-    let specs: Vec<GpuSpec> = response.json()?;
-    Ok(specs)
+/// Specs from cache or network; `None` when neither is usable.
+pub fn load_remote_specs() -> Option<Vec<GpuSpec>> {
+    let settings = crate::config::get();
+    let path = cache_path();
+    let mut cache = path.as_ref().and_then(read_cache).unwrap_or_default();
+    let url = settings.specs_url.clone();
+    let now = now_unix();
+    let same_source = cache.source_url == url;
+
+    let fresh = same_source && now.saturating_sub(cache.fetched_at_unix) < CACHE_TTL_SECS;
+    let backing_off =
+        same_source && now.saturating_sub(cache.last_attempt_unix) < RETRY_AFTER_FAILURE_SECS;
+    if fresh || settings.offline || backing_off {
+        return (same_source && !cache.specs.is_empty()).then_some(cache.specs);
+    }
+
+    cache.last_attempt_unix = now;
+    match fetch(&url) {
+        Ok(specs) if !specs.is_empty() => {
+            tracing::debug!(n = specs.len(), "GPU specs fetched from {url}");
+            cache.fetched_at_unix = now;
+            cache.source_url = url;
+            cache.specs = specs;
+        }
+        Ok(_) => tracing::warn!("GPU spec database at {url} is empty; using built-in table"),
+        Err(e) => {
+            tracing::warn!("GPU spec fetch from {url} failed ({e}); using cached/built-in table");
+            if !same_source {
+                cache.specs.clear();
+                cache.source_url = url;
+            }
+        }
+    }
+    if let Some(p) = &path {
+        write_cache(p, &cache);
+    }
+    (!cache.specs.is_empty()).then_some(cache.specs)
+}
+
+fn fetch(url: &str) -> anyhow::Result<Vec<GpuSpec>> {
+    let client = crate::net::blocking_client(Some(FETCH_TIMEOUT))?;
+    let resp = client.get(url).send()?.error_for_status()?;
+    Ok(resp.json()?)
 }

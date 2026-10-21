@@ -1,15 +1,9 @@
 use std::os::raw::{c_char, c_int, c_void};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tracing::{debug, info, warn};
+use tracing::warn;
 
-use crate::collectors::{MetricsCollector, RawSample};
+use crate::collectors::{GpuSample, Throttle};
 use crate::error::CalibrateError;
-use crate::metrics::units::{Celsius, Mhz, Mib, Percent, Watts};
 
 // IOKit / CoreFoundation type aliases
 
@@ -107,8 +101,8 @@ unsafe fn cf_dict_i64(dict: *const c_void, key: &[u8]) -> Option<i64> {
 // GPU snapshot
 
 struct GpuSnapshot {
-    utilization_pct: f32,
-    memory_used_bytes: u64,
+    utilization_pct: Option<f32>,
+    memory_used_bytes: Option<u64>,
 }
 
 /// Query all IOAccelerator services and return one `GpuSnapshot` per device.
@@ -123,7 +117,7 @@ fn query_gpu_stats() -> Result<Vec<GpuSnapshot>, CalibrateError> {
     let mut snapshots = Vec::new();
 
     unsafe {
-        let matching = IOServiceMatching(b"IOAccelerator\0".as_ptr() as *const c_char);
+        let matching = IOServiceMatching(c"IOAccelerator".as_ptr());
         if matching.is_null() {
             return Err(CalibrateError::AppleGpuInit(
                 "IOServiceMatching returned null".into(),
@@ -181,12 +175,9 @@ unsafe fn extract_snapshot(props: *const c_void) -> Option<GpuSnapshot> {
     // some AMD/Intel models expose "GPU Core Utilization" instead.
     let util_pct = cf_dict_i64(perf, b"Device Utilization %\0")
         .or_else(|| cf_dict_i64(perf, b"GPU Core Utilization\0"))
-        .unwrap_or(0)
-        .clamp(0, 100) as f32;
+        .map(|v| v.clamp(0, 100) as f32);
 
-    let mem_used = cf_dict_i64(perf, b"In use system memory\0")
-        .unwrap_or(0)
-        .max(0) as u64;
+    let mem_used = cf_dict_i64(perf, b"In use system memory\0").map(|v| v.max(0) as u64);
 
     Some(GpuSnapshot {
         utilization_pct: util_pct,
@@ -196,16 +187,13 @@ unsafe fn extract_snapshot(props: *const c_void) -> Option<GpuSnapshot> {
 
 // System memory
 
-/// Total physical RAM in bytes via `sysctl hw.memsize`.
-///
-/// On Apple Silicon this equals the GPU's VRAM budget because of the unified
-/// memory architecture.  Returns 0 on `sysctl` failure (should never happen).
+/// Total physical RAM in bytes via `sysctl hw.memsize` (0 on failure).
 fn total_memory_bytes() -> u64 {
     let mut size: u64 = 0;
     let mut len = std::mem::size_of::<u64>();
     let ret = unsafe {
         libc::sysctlbyname(
-            b"hw.memsize\0".as_ptr() as *const libc::c_char,
+            c"hw.memsize".as_ptr(),
             &mut size as *mut u64 as *mut libc::c_void,
             &mut len,
             std::ptr::null_mut(),
@@ -219,134 +207,101 @@ fn total_memory_bytes() -> u64 {
     }
 }
 
-// Process liveness
-
-/// Returns `true` if `pid` is still alive.
+/// GPU memory budget on unified-memory Macs.
 ///
-/// Uses `kill(pid, 0)` (POSIX), which succeeds without sending a signal when
-/// the process exists and is visible to the current user.
-fn process_is_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+/// Metal's `recommendedMaxWorkingSetSize` is what PyTorch MPS treats as the
+/// usable limit (typically ~65–75 % of RAM); total RAM overstates it.
+fn gpu_budget_bytes() -> u64 {
+    let metal = metal::Device::system_default()
+        .map(|d| d.recommended_max_working_set_size())
+        .unwrap_or(0);
+    if metal > 0 {
+        metal
+    } else {
+        total_memory_bytes()
+    }
 }
 
-// Collector
-
-/// Collects Apple Silicon (and AMD/Intel Mac) GPU metrics via IOKit on a
-/// dedicated OS thread.
-///
-/// Provides **system-wide** GPU utilization and unified-memory usage.
-/// macOS does not expose per-process GPU isolation to userspace without Metal
-/// instrumentation, so utilization reflects the whole GPU — consistent with
-/// Activity Monitor's "GPU" column.
-///
-/// `vram_total_mib` is populated with total physical RAM, which is the correct
-/// VRAM budget on Apple Silicon unified-memory systems.
-///
-/// CPU utilization (`cpu_utilization`) is left at `0.0` in this initial
-/// implementation; per-process CPU tracking via `proc_pidinfo` will be added
-/// in the Phase 2 `watch` command integration.
-pub struct AppleGpuCollector {
-    pid: u32,
-    interval: Duration,
+/// Apple GPU backend (IOKit). Figures are **system-wide**: macOS exposes no
+/// per-process GPU counters without Metal instrumentation inside the target.
+pub struct AppleBackend {
+    name: String,
+    budget_mib: u64,
 }
 
-impl AppleGpuCollector {
-    pub fn new(pid: u32, interval: Duration) -> Self {
-        Self { pid, interval }
+impl AppleBackend {
+    pub fn new(name: String) -> Result<Self, CalibrateError> {
+        query_gpu_stats()?;
+        Ok(Self {
+            name,
+            budget_mib: gpu_budget_bytes() / (1024 * 1024),
+        })
     }
 
-    /// Attempt a single IOKit GPU query to verify the framework is accessible.
-    ///
-    /// Called before spawning the collector thread so startup fails fast with
-    /// a human-readable error if IOKit is unavailable.
+    /// Verify IOKit is reachable.
     pub fn probe() -> Result<(), CalibrateError> {
         query_gpu_stats().map(|_| ())
     }
-}
 
-impl MetricsCollector for AppleGpuCollector {
-    fn run(self, tx: flume::Sender<RawSample>, stop: Arc<AtomicBool>) {
-        let total_bytes = total_memory_bytes();
-        let total_mib = Mib(total_bytes / (1024 * 1024));
-
-        info!(pid = self.pid, "AppleGpuCollector started");
-
-        loop {
-            if stop.load(Ordering::Relaxed) {
-                break;
+    pub fn sample(&mut self) -> Vec<GpuSample> {
+        let stats = match query_gpu_stats() {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("IOKit query failed: {e}");
+                return vec![];
             }
-
-            if !process_is_alive(self.pid) {
-                info!(
-                    pid = self.pid,
-                    "Process exited — AppleGpuCollector stopping"
-                );
-                stop.store(true, Ordering::Relaxed);
-                break;
-            }
-
-            let timestamp_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-
-            let stats = match query_gpu_stats() {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("AppleGpuCollector: IOKit query failed: {e}");
-                    std::thread::sleep(self.interval);
-                    continue;
-                }
-            };
-
-            for (idx, snap) in stats.into_iter().enumerate() {
-                let mem_pct = if total_bytes > 0 {
-                    (snap.memory_used_bytes as f32 / total_bytes as f32) * 100.0
-                } else {
-                    0.0
-                };
-
-                let sample = RawSample {
-                    timestamp_ms,
-                    gpu_index: idx as u32,
-                    sm_utilization: Percent::clamped(snap.utilization_pct),
-                    sm_clock_mhz: Mhz(0),
-                    sm_clock_max_mhz: Mhz(0),
-                    vram_used_mib: Mib(snap.memory_used_bytes / (1024 * 1024)),
-                    vram_total_mib: total_mib,
-                    mem_utilization: Percent::clamped(mem_pct),
-                    temperature: Celsius(0.0),
-                    power_draw: Watts(0.0),
-                    power_limit: Watts(0.0),
-                    throttle_thermal: false,
-                    throttle_power: false,
-                    throttle_hw_slowdown: false,
-                    cpu_utilization: Percent(0.0),
-                };
-
-                if tx.send(sample).is_err() {
-                    return;
-                }
-            }
-
-            debug!(
-                "AppleGpuCollector tick (pid={}, interval={:?})",
-                self.pid, self.interval
-            );
-            std::thread::sleep(self.interval);
-        }
+        };
+        stats
+            .into_iter()
+            .enumerate()
+            .map(|(idx, snap)| GpuSample {
+                index: idx as u32,
+                name: self.name.clone(),
+                util_pct: snap.utilization_pct,
+                prof: None,
+                sm_clock_mhz: None,
+                sm_clock_max_mhz: None,
+                vram_used_mib: snap.memory_used_bytes.map(|b| b / (1024 * 1024)),
+                vram_total_mib: (self.budget_mib > 0).then_some(self.budget_mib),
+                mem_util_pct: None,
+                temperature_c: None,
+                power_w: None,
+                power_limit_w: None,
+                throttle: Throttle::default(),
+            })
+            .collect()
     }
 }
 
-/// Return the total system-wide GPU memory in use (MiB) across all IOAccelerator
-/// devices.
+/// Total system-wide GPU memory in use (MiB) across all IOAccelerator devices.
 ///
-/// Used by `bench::memory` on macOS as the closest available equivalent to
-/// NVML's per-device VRAM usage query.  On Apple Silicon unified memory, this
-/// reflects the GPU memory pressure of all running processes.
+/// Used by `bench::memory` on macOS as the closest equivalent to NVML's
+/// per-device VRAM usage.
 pub fn gpu_memory_used_mib() -> anyhow::Result<f64> {
     let snapshots =
         query_gpu_stats().map_err(|e| anyhow::anyhow!("IOKit GPU memory query failed: {e}"))?;
-    let total_bytes: u64 = snapshots.iter().map(|s| s.memory_used_bytes).sum();
+    let total_bytes: u64 = snapshots.iter().filter_map(|s| s.memory_used_bytes).sum();
     Ok(total_bytes as f64 / (1024.0 * 1024.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iokit_reports_at_least_one_gpu_with_utilization() {
+        let stats = query_gpu_stats().expect("IOKit must be reachable on macOS");
+        assert!(!stats.is_empty(), "no IOAccelerator found");
+        assert!(stats.iter().any(|s| s.utilization_pct.is_some()));
+    }
+
+    #[test]
+    fn backend_reports_na_instead_of_zero() {
+        let mut b = AppleBackend::new("Apple GPU".into()).unwrap();
+        let s = b.sample();
+        assert!(!s.is_empty());
+        assert_eq!(s[0].temperature_c, None);
+        assert_eq!(s[0].power_w, None);
+        assert!(s[0].vram_total_mib.unwrap_or(0) > 0);
+    }
 }

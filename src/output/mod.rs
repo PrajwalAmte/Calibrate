@@ -15,4 +15,17 @@ pub trait OutputRenderer: Send {
 
     /// Called once when the session ends; print a final summary.
     fn finish(&mut self, snapshot: Option<&SessionSnapshot>);
+
+    /// Whether the user asked to quit through this renderer (TUI keys).
+    fn quit_requested(&mut self) -> bool {
+        false
+    }
+}
+
+/// Renderer that prints nothing (headless / exporter-only runs).
+pub struct NullRenderer;
+
+impl OutputRenderer for NullRenderer {
+    fn render(&mut self, _snapshot: &SessionSnapshot) {}
+    fn finish(&mut self, _snapshot: Option<&SessionSnapshot>) {}
 }

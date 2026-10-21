@@ -1,356 +1,392 @@
+//! GPU peak-throughput database and name matching.
+//!
+//! `bf16_tflops` is the **dense** (no sparsity) BF16/FP16 tensor-core rate with
+//! FP32 accumulation at boost clock — the denominator used for MFU in mixed
+//! precision training. GeForce cards run FP32-accumulate tensor math at half
+//! the FP16-accumulate rate, and the table reflects that.
+
 pub mod client;
 pub mod fallback;
 
+use serde::{Deserialize, Serialize};
+
 /// Specification for a single GPU model.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GpuSpec {
-    /// Canonical GPU name as reported by NVML (e.g. "NVIDIA GeForce RTX 3090").
+    /// Canonical short name (e.g. "RTX 3090", "H100 SXM").
     pub name: String,
-    /// Peak BF16 TFLOPS (used for MFU denominator).
+    /// Other names the same GPU is reported under (NVML, cloud providers).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// Peak dense BF16 tensor TFLOPS (MFU denominator).
     pub bf16_tflops: f64,
-    /// Peak FP32 TFLOPS.
+    /// Peak FP32 (non-tensor) TFLOPS.
     pub fp32_tflops: f64,
-    /// VRAM in GiB.
+    /// VRAM in GiB (typical SKU).
     pub vram_gib: u32,
-    /// Boost clock in MHz (for normalization reference).
+    /// Boost clock in MHz — the clock at which `bf16_tflops` is specified.
     pub boost_clock_mhz: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 }
 
-/// Port: anything that can resolve a GPU name to its spec.
-pub trait SpecsRepository: Send + Sync {
-    fn get_by_name(&self, name: &str) -> Option<GpuSpec>;
+impl GpuSpec {
+    fn is_valid(&self) -> bool {
+        !self.name.trim().is_empty()
+            && self.bf16_tflops.is_finite()
+            && self.bf16_tflops > 0.0
+            && self.bf16_tflops < 100_000.0
+            && self.fp32_tflops.is_finite()
+            && self.fp32_tflops > 0.0
+            && self.boost_clock_mhz > 0
+    }
+}
+
+/// Where a resolved spec came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecSource {
+    Remote,
+    Builtin,
+    /// GPU not in the database — peak throughput unknown.
+    Unknown,
+}
+
+/// Result of looking a GPU name up.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ResolvedSpec {
+    pub spec: GpuSpec,
+    pub source: SpecSource,
+}
+
+impl ResolvedSpec {
+    pub fn known(&self) -> bool {
+        self.source != SpecSource::Unknown
+    }
+}
+
+/// The in-memory spec database used for all lookups.
+#[derive(Debug, Clone)]
+pub struct SpecDb {
+    entries: Vec<(GpuSpec, SpecSource)>,
+}
+
+impl SpecDb {
+    /// Built-in table only (no I/O).
+    pub fn builtin() -> Self {
+        Self {
+            entries: fallback::builtin_specs()
+                .into_iter()
+                .map(|s| (s, SpecSource::Builtin))
+                .collect(),
+        }
+    }
+
+    /// Built-in table overlaid with the remote/cached database when available.
+    /// Never fails; never blocks longer than the configured HTTP timeout.
+    pub fn load() -> Self {
+        let mut db = Self::builtin();
+        if let Some(remote) = client::load_remote_specs() {
+            db.merge(remote);
+        }
+        db
+    }
+
+    /// Remote entries replace built-in ones with the same name; new names are added.
+    pub fn merge(&mut self, remote: Vec<GpuSpec>) {
+        for spec in remote.into_iter().filter(GpuSpec::is_valid) {
+            if let Some(slot) = self
+                .entries
+                .iter_mut()
+                .find(|(s, _)| s.name.eq_ignore_ascii_case(&spec.name))
+            {
+                // Remote values win, but never lose aliases this build knows
+                // about (an older remote file may predate them).
+                let mut spec = spec;
+                for a in &slot.0.aliases {
+                    if !spec.aliases.iter().any(|x| x.eq_ignore_ascii_case(a)) {
+                        spec.aliases.push(a.clone());
+                    }
+                }
+                *slot = (spec, SpecSource::Remote);
+            } else {
+                self.entries.push((spec, SpecSource::Remote));
+            }
+        }
+    }
+
+    /// Look a device name up. Unknown GPUs get a placeholder flagged `Unknown`
+    /// so callers can show "peak unknown" instead of a made-up number.
+    pub fn resolve(&self, name: &str) -> ResolvedSpec {
+        match self.find(name) {
+            Some((spec, source)) => ResolvedSpec {
+                spec: spec.clone(),
+                source,
+            },
+            None => ResolvedSpec {
+                spec: GpuSpec {
+                    name: name.to_string(),
+                    aliases: vec![],
+                    bf16_tflops: 0.0,
+                    fp32_tflops: 0.0,
+                    vram_gib: 0,
+                    boost_clock_mhz: 0,
+                    notes: None,
+                },
+                source: SpecSource::Unknown,
+            },
+        }
+    }
+
+    pub fn find(&self, name: &str) -> Option<(&GpuSpec, SpecSource)> {
+        let query = normalize_for_match(name);
+        if query.is_empty() {
+            return None;
+        }
+        self.entries
+            .iter()
+            .filter_map(|(spec, src)| {
+                std::iter::once(spec.name.as_str())
+                    .chain(spec.aliases.iter().map(String::as_str))
+                    .map(|n| match_score(&normalize_for_match(n), &query))
+                    .max()
+                    .filter(|&s| s > 0)
+                    .map(|s| (spec, *src, s))
+            })
+            .max_by_key(|&(_, _, s)| s)
+            .map(|(spec, src, _)| (spec, src))
+    }
 }
 
 //  Name matching
 
-/// Normalise a GPU device name ready for matching against spec-DB keys.
+/// Tokens that distinguish a different (usually faster) SKU. If the query has
+/// one, the matching spec must have it too — an "RTX 3090 Ti" must never
+/// silently resolve to "RTX 3090".
+const VARIANT_TOKENS: &[&str] = &[
+    "ti", "super", "max", "pro", "ultra", "nvl", "mobile", "laptop", "sff",
+];
+
+/// Normalise a device / listing name for matching.
 ///
-/// Strips vendor and product-line prefixes, replaces hyphens, and drops
-/// memory-size tokens and generic suffixes so the remaining tokens can be
-/// matched against short canonical keys such as "RTX 3090", "A100 SXM",
-/// or "M3 Max".
-///
-/// # Examples
 /// ```text
-/// "NVIDIA GeForce RTX 3090"  →  "rtx 3090"
-/// "NVIDIA A100-SXM4-80GB"    →  "a100 sxm4"
-/// "NVIDIA A100-PCIE-40GB"    →  "a100 pcie"
-/// "Tesla T4"                 →  "t4"
-/// "NVIDIA Tesla V100-SXM2-32GB" → "v100 sxm2"
-/// "Apple M3 Max GPU"         →  "m3 max"
-/// "Apple M1 Ultra GPU"       →  "m1 ultra"
+/// "NVIDIA GeForce RTX 3090"        → "rtx 3090"
+/// "NVIDIA A100-SXM4-80GB"          → "a100 sxm4"
+/// "NVIDIA H100 80GB HBM3"          → "h100 hbm3"
+/// "RTX 4090 (spot)"                → "rtx 4090"
+/// "RTX 4070S"                      → "rtx 4070 super"
+/// "NVIDIA RTX 6000 Ada Generation" → "rtx 6000 ada"
+/// "Apple M3 Max GPU"               → "m3 max"
 /// ```
 pub fn normalize_for_match(name: &str) -> String {
-    let lower = name.to_lowercase();
-    // Strip vendor prefixes in order of most-to-least specific so
-    // "NVIDIA Tesla T4" → strip "nvidia " → "tesla t4" → strip "tesla " → "t4".
-    let s = lower.strip_prefix("nvidia ").unwrap_or(&lower);
-    let s = s.strip_prefix("geforce ").unwrap_or(s);
-    let s = s.strip_prefix("tesla ").unwrap_or(s);
-    // Apple GPU names produced by `apple_gpu_name()` look like "Apple M3 Max GPU".
-    let s = s.strip_prefix("apple ").unwrap_or(s);
-    // Normalise separators, then filter uninformative tokens.
-    s.replace('-', " ")
-        .split_whitespace()
-        .filter(|t| !is_memory_size_token(t) && !is_generic_suffix(t))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Score how well `spec_name` matches `normalized_query`.
-///
-/// All tokens in the normalised spec name must prefix-match at least one token
-/// in `normalized_query`.  A score of 0 means no match.  Higher scores indicate
-/// more-specific matches, allowing "A10G" to beat "A10" when the query is "A10G".
-pub fn match_score(spec_name: &str, normalized_query: &str) -> usize {
-    let spec_lower = spec_name.to_lowercase();
-    let query_tokens: Vec<&str> = normalized_query.split_whitespace().collect();
-
-    let mut total = 0usize;
-    for spec_token in spec_lower.split_whitespace() {
-        // Find the query token that prefix-matches this spec token; add the
-        // number of characters matched so longer (more-specific) specs win.
-        let best = query_tokens
-            .iter()
-            .filter(|qt| qt.starts_with(spec_token))
-            .map(|_| spec_token.len())
-            .max();
-        match best {
-            Some(chars) => total += chars,
-            None => return 0, // all spec tokens must match; any miss → no match
+    let mut lower = name.to_lowercase();
+    // Drop parenthesised annotations such as "(spot)" or "(PCIe)".
+    while let (Some(a), Some(b)) = (lower.find('('), lower.find(')')) {
+        if b > a {
+            lower.replace_range(a..=b, " ");
+        } else {
+            break;
         }
     }
-    total
+    let lower = lower.replace(['-', '_', '/'], " ");
+    let mut tokens: Vec<String> = Vec::new();
+    for t in lower.split_whitespace() {
+        if matches!(
+            t,
+            "nvidia" | "geforce" | "tesla" | "quadro" | "apple" | "gpu" | "generation"
+        ) || is_memory_size_token(t)
+        {
+            continue;
+        }
+        // "4070s" → "4070 super"
+        if t.len() > 2 && t.ends_with('s') && t[..t.len() - 1].chars().all(|c| c.is_ascii_digit()) {
+            tokens.push(t[..t.len() - 1].to_string());
+            tokens.push("super".into());
+            continue;
+        }
+        tokens.push(t.to_string());
+    }
+    tokens.join(" ")
 }
 
-/// Return the best-matching spec from `specs` for the given NVML device name.
-///
-/// Returns `None` when no spec scores above zero — i.e. the GPU is entirely
-/// unknown to the database.
-pub fn find_best_match<'a>(specs: &'a [GpuSpec], query: &str) -> Option<&'a GpuSpec> {
-    let normalised = normalize_for_match(query);
-    specs
-        .iter()
-        .filter_map(|spec| {
-            let score = match_score(&spec.name, &normalised);
-            if score > 0 {
-                Some((spec, score))
-            } else {
-                None
+fn token_matches(spec_tok: &str, query_tok: &str) -> bool {
+    if spec_tok == query_tok {
+        return true;
+    }
+    // Purely alphabetic spec tokens may match a numbered variant
+    // ("sxm" ↔ "sxm4", "pcie" ↔ "pcie4") but model numbers must be exact
+    // ("a10" ≠ "a100", "l4" ≠ "l40s").
+    spec_tok.chars().all(|c| c.is_ascii_alphabetic())
+        && query_tok.starts_with(spec_tok)
+        && query_tok[spec_tok.len()..]
+            .chars()
+            .all(|c| c.is_ascii_digit())
+}
+
+/// Score how well normalised `spec_name` matches normalised `query`.
+/// 0 = no match. Every spec token must match, and every variant token in the
+/// query must be matched. Longer (more specific) specs score higher.
+pub fn match_score(spec_name: &str, query: &str) -> usize {
+    let spec_tokens: Vec<&str> = spec_name.split_whitespace().collect();
+    let query_tokens: Vec<&str> = query.split_whitespace().collect();
+    if spec_tokens.is_empty() {
+        return 0;
+    }
+    let mut used = vec![false; query_tokens.len()];
+    let mut score = 0;
+    for st in &spec_tokens {
+        let hit = query_tokens
+            .iter()
+            .enumerate()
+            .find(|(i, qt)| !used[*i] && token_matches(st, qt));
+        match hit {
+            Some((i, _)) => {
+                used[i] = true;
+                score += st.len();
             }
-        })
-        .max_by_key(|(_, score)| *score)
-        .map(|(spec, _)| spec)
+            None => return 0,
+        }
+    }
+    for (i, qt) in query_tokens.iter().enumerate() {
+        if !used[i] && VARIANT_TOKENS.contains(qt) {
+            return 0;
+        }
+    }
+    score
 }
 
 fn is_memory_size_token(token: &str) -> bool {
-    token.ends_with("gb") && token[..token.len() - 2].parse::<u32>().is_ok()
+    let digits = token
+        .strip_suffix("gb")
+        .or_else(|| token.strip_suffix('g'))
+        .unwrap_or("");
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
 }
-
-/// Returns `true` for tokens that are generic suffixes carrying no
-/// discriminating information when matching GPU names.
-///
-/// "gpu" is appended by `process::attach::apple_gpu_name()` to distinguish
-/// the GPU name from the chip name (e.g. "Apple M3 Max GPU"), but the spec-DB
-/// keys for Apple Silicon are stored without that suffix ("M3 Max").
-fn is_generic_suffix(token: &str) -> bool {
-    token == "gpu"
-}
-
-//  Production resolver
-
-/// Resolve a spec using the remote → cache → baked-in fallback chain.
-///
-/// Called once at startup via `tokio::task::spawn_blocking`.
-pub fn resolve(name: &str) -> GpuSpec {
-    if let Some(spec) = client::HttpSpecsClient::load().get_by_name(name) {
-        return spec;
-    }
-    if let Some(spec) = fallback::FallbackRepository.get_by_name(name) {
-        tracing::debug!("Using fallback spec for '{name}'");
-        return spec;
-    }
-    tracing::warn!("GPU '{name}' not in spec database; MFU will be approximate");
-    GpuSpec {
-        name: name.to_string(),
-        bf16_tflops: 20.0,
-        fp32_tflops: 20.0,
-        vram_gib: 16,
-        boost_clock_mhz: 1800,
-    }
-}
-
-//  Tests
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu_specs::fallback::FallbackRepository;
 
-    //  normalize_for_match
+    fn db() -> SpecDb {
+        SpecDb::builtin()
+    }
+
+    fn resolves_to(query: &str, expected: &str) {
+        let r = db().resolve(query);
+        assert_eq!(r.spec.name, expected, "query {query:?}");
+        assert!(r.known());
+    }
 
     #[test]
-    fn normalize_geforce_prefix() {
+    fn normalization_examples() {
         assert_eq!(normalize_for_match("NVIDIA GeForce RTX 3090"), "rtx 3090");
-    }
-
-    #[test]
-    fn normalize_tesla_prefix() {
-        assert_eq!(normalize_for_match("Tesla T4"), "t4");
-        assert_eq!(normalize_for_match("NVIDIA Tesla T4"), "t4");
-    }
-
-    #[test]
-    fn normalize_hyphenated_with_memory() {
         assert_eq!(normalize_for_match("NVIDIA A100-SXM4-80GB"), "a100 sxm4");
-        assert_eq!(normalize_for_match("NVIDIA A100-PCIE-40GB"), "a100 pcie");
-        assert_eq!(
-            normalize_for_match("NVIDIA Tesla V100-SXM2-32GB"),
-            "v100 sxm2"
-        );
-    }
-
-    #[test]
-    fn normalize_h100_sxm() {
-        assert_eq!(normalize_for_match("NVIDIA H100 SXM5 80GB"), "h100 sxm5");
-        // "80GB" is a memory-size token and gets filtered out.
-        assert_eq!(normalize_for_match("NVIDIA H100 PCIe 80GB"), "h100 pcie");
-        assert_eq!(normalize_for_match("NVIDIA H100 PCIe"), "h100 pcie");
-    }
-
-    //  match_score
-
-    #[test]
-    fn match_score_exact() {
-        assert!(match_score("RTX 3090", "rtx 3090") > 0);
-    }
-
-    #[test]
-    fn match_score_prefix_sxm() {
-        // "sxm" token in spec should prefix-match "sxm4" in query.
-        assert!(match_score("A100 SXM", "a100 sxm4") > 0);
-    }
-
-    #[test]
-    fn match_score_no_match_wrong_variant() {
-        // A100 PCIe tokens should not match an SXM query.
-        assert_eq!(match_score("A100 PCIe", "a100 sxm4"), 0);
-    }
-
-    #[test]
-    fn match_score_a10g_beats_a10_for_a10g_query() {
-        let score_a10g = match_score("A10G", "a10g");
-        let score_a10 = match_score("A10", "a10g");
-        assert!(
-            score_a10g > score_a10,
-            "A10G ({score_a10g}) should score higher than A10 ({score_a10}) for 'A10G' query"
-        );
-    }
-
-    #[test]
-    fn match_score_a10_matches_a10_not_a10g() {
-        // "a10g".starts_with("a10g") only; "a10".starts_with("a10g") is false.
-        assert!(match_score("A10", "a10") > 0);
-        assert_eq!(
-            match_score("A10G", "a10"),
-            0,
-            "A10G should not match plain 'a10' query"
-        );
-    }
-
-    //  find_best_match / FallbackRepository integration ─
-
-    #[test]
-    fn fallback_resolves_geforce_rtx_3090() {
-        let spec = FallbackRepository
-            .get_by_name("NVIDIA GeForce RTX 3090")
-            .unwrap();
-        assert!(
-            (spec.bf16_tflops - 35.6).abs() < 0.1,
-            "unexpected tflops: {}",
-            spec.bf16_tflops
-        );
-        assert_eq!(spec.vram_gib, 24);
-    }
-
-    #[test]
-    fn fallback_resolves_tesla_t4() {
-        let spec = FallbackRepository.get_by_name("Tesla T4").unwrap();
-        assert!((spec.bf16_tflops - 65.0).abs() < 0.1);
-    }
-
-    #[test]
-    fn fallback_resolves_a100_sxm_from_nvml_name() {
-        let spec = FallbackRepository
-            .get_by_name("NVIDIA A100-SXM4-80GB")
-            .unwrap();
-        // Should match "A100 SXM", not PCIe.
-        assert!(
-            spec.name.contains("SXM"),
-            "expected SXM variant, got: {}",
-            spec.name
-        );
-    }
-
-    #[test]
-    fn fallback_resolves_a100_pcie_from_nvml_name() {
-        let spec = FallbackRepository
-            .get_by_name("NVIDIA A100-PCIE-40GB")
-            .unwrap();
-        assert!(
-            spec.name.to_lowercase().contains("pcie"),
-            "expected PCIe variant, got: {}",
-            spec.name
-        );
-    }
-
-    #[test]
-    fn fallback_a10g_disambiguated_from_a10() {
-        let a10g = FallbackRepository.get_by_name("NVIDIA A10G").unwrap();
-        let a10 = FallbackRepository.get_by_name("NVIDIA A10").unwrap();
-        assert!(
-            a10g.name.to_uppercase().contains("A10G"),
-            "got: {}",
-            a10g.name
-        );
-        assert_eq!(a10.name.to_uppercase().trim(), "A10", "got: {}", a10.name);
-    }
-
-    #[test]
-    fn fallback_unknown_gpu_returns_none() {
-        assert!(FallbackRepository
-            .get_by_name("NVIDIA RTX Unknown 9999X")
-            .is_none());
-    }
-
-    //  Apple Silicon normalization and resolution
-
-    #[test]
-    fn normalize_apple_silicon_strips_prefix_and_suffix() {
+        assert_eq!(normalize_for_match("NVIDIA H100 80GB HBM3"), "h100 hbm3");
+        assert_eq!(normalize_for_match("RTX 4090 (spot)"), "rtx 4090");
+        assert_eq!(normalize_for_match("RTX 4070S"), "rtx 4070 super");
+        assert_eq!(normalize_for_match("Tesla V100-SXM2-16GB"), "v100 sxm2");
         assert_eq!(normalize_for_match("Apple M3 Max GPU"), "m3 max");
-        assert_eq!(normalize_for_match("Apple M1 Ultra GPU"), "m1 ultra");
-        assert_eq!(normalize_for_match("Apple M2 Pro GPU"), "m2 pro");
-        assert_eq!(normalize_for_match("Apple M4 GPU"), "m4");
-        assert_eq!(normalize_for_match("Apple M1 GPU"), "m1");
+        assert_eq!(normalize_for_match("A100 SXM 40G"), "a100 sxm");
     }
 
     #[test]
-    fn fallback_resolves_apple_m3_max() {
-        let spec = FallbackRepository.get_by_name("Apple M3 Max GPU").unwrap();
-        assert_eq!(spec.name, "M3 Max");
+    fn real_nvml_device_names_resolve() {
+        resolves_to("NVIDIA H100 80GB HBM3", "H100 SXM");
+        resolves_to("NVIDIA H100 PCIe", "H100 PCIe");
+        resolves_to("NVIDIA H100 NVL", "H100 NVL");
+        resolves_to("NVIDIA H200", "H200");
+        resolves_to("NVIDIA GH200 480GB", "GH200");
+        resolves_to("NVIDIA B200", "B200");
+        resolves_to("NVIDIA A100-SXM4-80GB", "A100 SXM");
+        resolves_to("NVIDIA A100 80GB PCIe", "A100 PCIe");
+        resolves_to("NVIDIA A10G", "A10G");
+        resolves_to("NVIDIA A10", "A10");
+        resolves_to("NVIDIA L4", "L4");
+        resolves_to("NVIDIA L40S", "L40S");
+        resolves_to("NVIDIA L40", "L40");
+        resolves_to("Tesla T4", "T4");
+        resolves_to("Tesla V100-SXM2-16GB", "V100 SXM2");
+        resolves_to("NVIDIA GeForce RTX 4090", "RTX 4090");
+        resolves_to("NVIDIA GeForce RTX 5090", "RTX 5090");
+        resolves_to("NVIDIA GeForce RTX 3090 Ti", "RTX 3090 Ti");
+        resolves_to("NVIDIA RTX A6000", "RTX A6000");
+        resolves_to("NVIDIA RTX 6000 Ada Generation", "RTX 6000 Ada");
+        resolves_to("Apple M3 Max GPU", "M3 Max");
+        resolves_to("Apple M2 GPU", "M2");
+        resolves_to("NVIDIA RTX 4000 Ada Generation", "RTX 4000 Ada");
+        resolves_to("RTX 4000 Ada SFF", "RTX 4000 Ada SFF");
+        resolves_to("NVIDIA RTX A4500", "RTX A4500");
+    }
+
+    #[test]
+    fn cloud_listing_names_resolve() {
+        resolves_to("RTX 4090 (spot)", "RTX 4090");
+        resolves_to("H100 SXM", "H100 SXM");
+        resolves_to("A100 SXM 40GB", "A100 SXM");
+        resolves_to("RTX 4080 SUPER", "RTX 4080 Super");
+        resolves_to("RTX 4070S", "RTX 4070 Super");
+        resolves_to("Tesla V100", "V100 PCIe");
+        resolves_to("H200 SXM", "H200");
+    }
+
+    #[test]
+    fn model_numbers_must_match_exactly() {
+        assert_eq!(match_score("a10", "a100"), 0);
+        assert_eq!(match_score("l4", "l40s"), 0);
+        assert!(match_score("a100 sxm", "a100 sxm4") > 0);
+    }
+
+    #[test]
+    fn variant_suffix_never_falls_back_to_base_model() {
+        assert_eq!(match_score("rtx 3090", "rtx 3090 ti"), 0);
+        assert_eq!(match_score("m3", "m3 max"), 0);
+        assert!(!db().resolve("NVIDIA GeForce RTX 4060 Super").known());
+    }
+
+    #[test]
+    fn unknown_gpu_is_flagged_not_invented() {
+        let r = db().resolve("NVIDIA Quantum Flux 9000");
+        assert_eq!(r.source, SpecSource::Unknown);
+        assert_eq!(r.spec.bf16_tflops, 0.0);
+        assert!(!db().resolve("").known());
+    }
+
+    #[test]
+    fn remote_entries_override_and_extend() {
+        let mut db = db();
+        let base = db.resolve("RTX 4090").spec.bf16_tflops;
+        db.merge(vec![
+            GpuSpec {
+                name: "RTX 4090".into(),
+                aliases: vec![],
+                bf16_tflops: base + 1.0,
+                fp32_tflops: 82.6,
+                vram_gib: 24,
+                boost_clock_mhz: 2520,
+                notes: None,
+            },
+            GpuSpec {
+                name: "Bogus".into(),
+                aliases: vec![],
+                bf16_tflops: -5.0,
+                fp32_tflops: 1.0,
+                vram_gib: 1,
+                boost_clock_mhz: 1,
+                notes: None,
+            },
+        ]);
+        let r = db.resolve("NVIDIA GeForce RTX 4090");
+        assert_eq!(r.source, SpecSource::Remote);
+        // An older remote entry without aliases must not drop built-in ones.
+        let mut db2 = SpecDb::builtin();
+        let mut v100 = db2.resolve("V100 PCIe").spec;
+        v100.aliases.clear();
+        db2.merge(vec![v100]);
+        assert!(db2.resolve("Tesla V100").known());
+        assert_eq!(r.spec.bf16_tflops, base + 1.0);
         assert!(
-            (spec.bf16_tflops - 28.4).abs() < 0.1,
-            "got {}",
-            spec.bf16_tflops
-        );
-        assert_eq!(spec.vram_gib, 36);
-    }
-
-    #[test]
-    fn fallback_resolves_apple_m1() {
-        let spec = FallbackRepository.get_by_name("Apple M1 GPU").unwrap();
-        assert_eq!(spec.name, "M1");
-        assert!((spec.fp32_tflops - 2.6).abs() < 0.1);
-    }
-
-    #[test]
-    fn fallback_apple_m3_max_beats_m3_for_max_query() {
-        let max_spec = FallbackRepository.get_by_name("Apple M3 Max GPU").unwrap();
-        let base_spec = FallbackRepository.get_by_name("Apple M3 GPU").unwrap();
-        assert_eq!(max_spec.name, "M3 Max", "got: {}", max_spec.name);
-        assert_eq!(base_spec.name, "M3", "got: {}", base_spec.name);
-        assert!(
-            max_spec.bf16_tflops > base_spec.bf16_tflops,
-            "M3 Max should have higher TFLOPS than M3"
-        );
-    }
-
-    #[test]
-    fn fallback_apple_m1_pro_not_matched_by_plain_m1() {
-        let spec = FallbackRepository.get_by_name("Apple M1 GPU").unwrap();
-        assert_eq!(spec.name, "M1", "plain M1 query must not return M1 Pro/Max");
-    }
-
-    #[test]
-    fn nvidia_spec_not_matched_by_apple_query() {
-        // Apple queries should never resolve to an NVIDIA spec.
-        let spec = FallbackRepository.get_by_name("Apple M3 Max GPU").unwrap();
-        assert!(
-            !spec.name.contains("RTX") && !spec.name.contains("A100"),
-            "Apple query matched NVIDIA spec: {}",
-            spec.name
-        );
-    }
-
-    #[test]
-    fn apple_spec_not_matched_by_nvidia_query() {
-        let spec = FallbackRepository
-            .get_by_name("NVIDIA GeForce RTX 4090")
-            .unwrap();
-        assert!(
-            !spec.name.starts_with('M'),
-            "NVIDIA query matched Apple spec: {}",
-            spec.name
+            !db.resolve("Bogus").known(),
+            "invalid remote specs are dropped"
         );
     }
 }

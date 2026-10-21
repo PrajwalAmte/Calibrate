@@ -1,5 +1,3 @@
-#![allow(dead_code)] // types consumed in Phase 2–5
-
 pub mod duration;
 pub mod model;
 pub mod providers;
@@ -8,106 +6,136 @@ pub mod vram;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-//  VRAM breakdown
+use crate::cli::{FinetuneMethod, OptimizerLib, QuantLevel};
+use crate::plan::model::ModelSpec;
 
-/// Per-component breakdown of estimated VRAM usage for a training run.
-///
-/// All values are in gibibytes (GiB). The sum of the components equals `total_gib`
-/// after the optimizer efficiency factor is applied.
+/// Version of the `plan --output json` schema. Bump on breaking changes.
+pub const PLAN_SCHEMA_VERSION: u32 = 1;
+
+/// Per-GPU VRAM estimate. All values in GiB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VramBreakdown {
-    /// Model weight tensors (parameter count × bytes per weight).
+    /// GPUs the workload is spread over (sharding only with DeepSpeed ZeRO-3).
+    pub gpu_count: u32,
     pub weights_gib: f64,
-    /// Gradient tensors. Zero for LoRA/QLoRA (only adapter gradients stored).
     pub gradients_gib: f64,
-    /// Adam first and second moment optimizer states.
     pub optimizer_gib: f64,
-    /// Intermediate activations stored for the backward pass.
-    /// Assumes gradient checkpointing is enabled; without it this is ~8× larger.
+    /// Activations with gradient checkpointing (per-layer checkpoints plus
+    /// one layer's recompute working set).
     pub activations_gib: f64,
-    /// Key-value attention cache proportional to sequence length and layers.
-    pub kv_cache_gib: f64,
-    /// Reduction applied by the optimizer library (e.g. Unsloth −40–60 %).
-    /// Negative value represents the memory saved; zero when no library is used.
-    pub library_savings_gib: f64,
-    /// Total VRAM estimate (sum of components + library_savings_gib).
+    /// Logits and the fp32 copy used by the cross-entropy loss.
+    pub logits_gib: f64,
+    /// CUDA context, cuBLAS workspace and allocator fragmentation.
+    pub overhead_gib: f64,
     pub total_gib: f64,
+    /// Assumptions behind the numbers, shown to the user.
+    pub notes: Vec<String>,
 }
 
-//  Workload summary─
+/// Training configuration as the planner understands it.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct TrainingSetup {
+    pub method: FinetuneMethod,
+    pub optimizer_lib: OptimizerLib,
+    pub quantization: QuantLevel,
+    pub micro_batch: u32,
+    pub seq_len: u32,
+}
 
-/// Resolved model properties and the VRAM estimate derived from them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WorkloadSummary {
-    /// The model identifier or path as supplied by the user.
-    pub model_id: String,
-    /// Resolved parameter count in billions (e.g. 7.0 for a 7B model).
-    pub param_count_b: f64,
-    /// Full VRAM breakdown showing each component's contribution.
-    pub vram_breakdown: VramBreakdown,
-    /// Minimum VRAM (GiB) that a GPU must have to run this workload.
-    /// Equal to `vram_breakdown.total_gib` rounded up to a safe margin.
+    pub model: ModelSpec,
+    pub setup: TrainingSetup,
+    /// Single-GPU VRAM estimate.
+    pub vram: VramBreakdown,
+    /// VRAM a single GPU must have.
     pub required_vram_gib: f64,
-    /// Human-readable list of GPU memory tiers that can satisfy the requirement
-    /// (e.g. ["16GB", "24GB", "40GB"]).
     pub fitting_tiers: Vec<String>,
+    pub dataset_rows: Option<u64>,
+    pub epochs: u32,
+    pub total_tokens: Option<f64>,
+    /// Hardware FLOPs including activation recomputation.
+    pub total_hardware_flops: Option<f64>,
+    /// Hardware utilization assumed for durations (0–1).
+    pub assumed_utilization: f64,
+    pub assumptions: Vec<String>,
 }
 
-//  Provider listing
-
-/// Availability of a GPU instance at query time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AvailabilityStatus {
-    /// Instance can be launched immediately.
     Available,
-    /// Instance is listed but currently has no capacity.
     Unavailable,
-    /// Instance is available but requires waiting in a queue.
     Queue { estimated_wait_minutes: u32 },
 }
 
-/// Flags that must be surfaced to the user alongside a listing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ListingFlag {
-    /// Spot / preemptible instance — may be interrupted mid-job.
+    /// Interruptible / preemptible instance.
     Spot,
-    /// Vast.ai or other auction-market listing — price may change before launch.
+    /// RunPod Community Cloud: third-party hosts, fewer guarantees.
+    CommunityCloud,
+    /// Marketplace price that may change before launch (Vast.ai).
     PriceVolatile,
-    /// Machine reliability score is below the 0.95 threshold.
+    /// Host reliability score below 0.95.
     LowReliability,
-    /// Instance is listed but currently unavailable to rent.
+    /// Listed but no capacity right now.
     CurrentlyUnavailable,
+    /// GPU not in the spec database — no duration or cost estimate.
+    UnknownGpu,
 }
 
-/// A single GPU offering from one provider, enriched with duration + cost estimates.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RankedListing {
-    /// Provider name (e.g. "RunPod", "Lambda", "Vast.ai").
+/// A raw offer from a provider (or a `--prices-file`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GpuListing {
     pub provider: String,
-    /// GPU model name (e.g. "RTX 3090", "A100 SXM4 80GB").
     pub gpu_model: String,
-    /// GPU VRAM in GiB.
-    pub vram_gib: f64,
-    /// Current hourly price in USD.
+    #[serde(default = "one")]
+    pub gpu_count: u32,
+    pub vram_per_gpu_gib: f64,
+    /// Price for the whole instance (all GPUs), USD per hour.
     pub hourly_usd: f64,
-    /// Estimated training duration range.
-    /// `None` when `--dataset-rows` was not provided.
-    pub duration_range: Option<DurationRange>,
-    /// Estimated total cost range.
-    /// `None` when `--dataset-rows` was not provided.
-    pub cost_range: Option<CostRange>,
-    /// Availability at query time.
+    #[serde(default = "available")]
     pub availability: AvailabilityStatus,
-    /// Flags that should be shown to the user.
+    #[serde(default)]
     pub flags: Vec<ListingFlag>,
 }
 
-//  Duration and cost ranges
+fn one() -> u32 {
+    1
+}
+fn available() -> AvailabilityStatus {
+    AvailabilityStatus::Available
+}
 
-/// Training duration range in seconds (low estimate to high estimate).
-///
-/// The range reflects ±MFU variability and real-world scheduling overhead
-/// rather than false point-estimate precision.
+/// A listing enriched with fit, duration and cost.
+#[derive(Debug, Clone, Serialize)]
+pub struct RankedListing {
+    #[serde(flatten)]
+    pub listing: GpuListing,
+    pub peak_tflops_per_gpu: Option<f64>,
+    pub required_vram_per_gpu_gib: f64,
+    pub duration_range: Option<DurationRange>,
+    pub cost_range: Option<CostRange>,
+    pub over_budget: bool,
+}
+
+impl RankedListing {
+    pub fn display_gpu(&self) -> String {
+        if self.listing.gpu_count > 1 {
+            format!("{}× {}", self.listing.gpu_count, self.listing.gpu_model)
+        } else {
+            self.listing.gpu_model.clone()
+        }
+    }
+    pub fn is_launchable(&self) -> bool {
+        self.listing.availability == AvailabilityStatus::Available
+            && !self
+                .listing
+                .flags
+                .contains(&ListingFlag::CurrentlyUnavailable)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DurationRange {
     pub low_secs: f64,
@@ -115,19 +143,17 @@ pub struct DurationRange {
 }
 
 impl DurationRange {
-    /// Format the range as a human-readable string (e.g. "1.5–2.5h").
     pub fn display(&self) -> String {
-        let low_h = self.low_secs / 3600.0;
-        let high_h = self.high_secs / 3600.0;
-        if high_h < 1.0 {
-            format!("{:.0}–{:.0}m", low_h * 60.0, high_h * 60.0)
+        use crate::metrics::units::fmt_duration;
+        let (a, b) = (fmt_duration(self.low_secs), fmt_duration(self.high_secs));
+        if a == b {
+            a
         } else {
-            format!("{:.1}–{:.1}h", low_h, high_h)
+            format!("{a}–{b}")
         }
     }
 }
 
-/// Estimated total cost range in USD.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostRange {
     pub low_usd: f64,
@@ -135,52 +161,38 @@ pub struct CostRange {
 }
 
 impl CostRange {
-    /// Format as a human-readable string (e.g. "$0.46–$0.70").
     pub fn display(&self) -> String {
-        format!("${:.2}–${:.2}", self.low_usd, self.high_usd)
+        use crate::metrics::units::fmt_usd;
+        format!("{}–{}", fmt_usd(self.low_usd), fmt_usd(self.high_usd))
     }
 }
 
-//  Recommendation─
-
-/// The tool's top pick, plus an optional conservative alternative.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PlanRecommendation {
-    /// The recommended listing (lowest estimated cost among available GPUs).
     pub listing: RankedListing,
-    /// One-sentence explanation of why this listing was chosen.
     pub rationale: String,
-    /// A stable-price alternative when the top recommendation is volatile
-    /// (e.g. the top pick is Vast.ai but a RunPod option is only marginally
-    /// more expensive). `None` when the top pick is already stable.
+    /// A stable-price alternative when the top pick is volatile.
     pub safe_alternative: Option<RankedListing>,
 }
 
-//  Provider skip
-
-/// A provider whose listings could not be fetched, with the reason.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkippedProvider {
     pub name: String,
     pub reason: String,
 }
 
-//  Top-level report─
-
-/// Complete output of a `calibrate plan` run, suitable for serialization to JSON.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PlanReport {
-    /// Resolved model and VRAM analysis.
+    pub schema_version: u32,
     pub workload: WorkloadSummary,
-    /// All GPU listings that meet the VRAM requirement, sorted by estimated
-    /// total cost (ascending). Listings that exceed the budget are included
-    /// but flagged in the output.
+    /// Listings that fit, sorted by estimated cost (ascending).
     pub listings: Vec<RankedListing>,
-    /// The recommended configuration, if at least one viable listing was found.
+    /// Listings excluded because the model does not fit in their VRAM.
+    pub excluded_too_small: usize,
     pub recommendation: Option<PlanRecommendation>,
-    /// Providers skipped due to API errors or timeouts.
     pub skipped_providers: Vec<SkippedProvider>,
-    /// Timestamp at which provider pricing was fetched.
+    /// Where prices came from: "live", "cache", "file".
+    pub price_source: String,
     pub generated_at: DateTime<Utc>,
 }
 
@@ -189,52 +201,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn duration_range_formats_minutes_below_one_hour() {
-        let dr = DurationRange {
-            low_secs: 1200.0,
-            high_secs: 2400.0,
-        };
-        let s = dr.display();
-        assert!(s.contains('m'), "expected minutes format, got: {s}");
+    fn duration_formats() {
+        assert_eq!(
+            DurationRange {
+                low_secs: 1200.0,
+                high_secs: 2400.0
+            }
+            .display(),
+            "20m–40m"
+        );
+        assert_eq!(
+            DurationRange {
+                low_secs: 3.0 * 3600.0,
+                high_secs: 5.0 * 3600.0
+            }
+            .display(),
+            "3.0h–5.0h"
+        );
     }
 
     #[test]
-    fn duration_range_formats_hours_above_one_hour() {
-        let dr = DurationRange {
-            low_secs: 5400.0,
-            high_secs: 9000.0,
-        };
-        let s = dr.display();
-        assert!(s.contains('h'), "expected hours format, got: {s}");
-    }
-
-    #[test]
-    fn cost_range_display_includes_dollar_sign() {
-        let cr = CostRange {
+    fn cost_formats() {
+        let c = CostRange {
             low_usd: 0.46,
-            high_usd: 0.70,
+            high_usd: 1234.0,
         };
-        let s = cr.display();
-        assert!(s.starts_with('$'), "got: {s}");
-        assert!(s.contains("0.46"), "got: {s}");
-        assert!(s.contains("0.70"), "got: {s}");
+        assert_eq!(c.display(), "$0.46–$1,234");
     }
 
     #[test]
-    fn listing_flags_are_serializable() {
+    fn listing_json_defaults() {
+        let l: GpuListing = serde_json::from_str(
+            r#"{"provider":"onprem","gpu_model":"H100 SXM","vram_per_gpu_gib":80,"hourly_usd":2.0}"#,
+        )
+        .unwrap();
+        assert_eq!(l.gpu_count, 1);
+        assert_eq!(l.availability, AvailabilityStatus::Available);
+    }
+
+    #[test]
+    fn flags_round_trip() {
         let flags = vec![ListingFlag::Spot, ListingFlag::PriceVolatile];
         let json = serde_json::to_string(&flags).unwrap();
         let back: Vec<ListingFlag> = serde_json::from_str(&json).unwrap();
         assert_eq!(flags, back);
-    }
-
-    #[test]
-    fn availability_status_queue_round_trips() {
-        let status = AvailabilityStatus::Queue {
-            estimated_wait_minutes: 15,
-        };
-        let json = serde_json::to_string(&status).unwrap();
-        let back: AvailabilityStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(status, back);
     }
 }

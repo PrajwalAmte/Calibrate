@@ -1,126 +1,146 @@
+//! Per-GPU VRAM estimate for fine-tuning.
+//!
+//! Model (bytes):
+//! * weights: 2/param bf16, 1 for int8, ~0.53 for NF4 (incl. quantisation
+//!   constants); embeddings and LM head stay 16-bit when quantised.
+//! * full fine-tune, mixed-precision AdamW: grads 2 + fp32 master/m/v 12
+//!   bytes per param (the "16 bytes/param" rule). LoRA adapters (rank 16 on
+//!   every linear layer) are trained in fp32: 4 + 12 bytes per adapter param.
+//! * activations with gradient checkpointing: one bf16 checkpoint per layer
+//!   plus one layer's recompute working set, `b·s·(16h + 6f)` bytes with
+//!   FlashAttention/SDPA (no materialised attention scores).
+//! * logits: `b·s·V` in bf16 plus the fp32 copy used by cross-entropy.
+//! * overhead: CUDA context + workspaces (~0.75 GiB) and 5 % fragmentation.
+
+use anyhow::{bail, Result};
+
 use crate::cli::{FinetuneMethod, OptimizerLib, QuantLevel};
 use crate::plan::model::ModelSpec;
-use crate::plan::VramBreakdown;
+use crate::plan::{TrainingSetup, VramBreakdown};
 
-const GIB: f64 = 1_073_741_824.0; // 2^30 bytes
+const GIB: f64 = 1_073_741_824.0;
+pub const LORA_RANK: f64 = 16.0;
+const CUDA_CONTEXT_GIB: f64 = 0.75;
+const FRAGMENTATION: f64 = 0.05;
 
-/// Default training sequence length used for activation/KV-cache estimates.
-/// 2048 is a conservative pick that covers most fine-tuning scenarios.
-const DEFAULT_SEQ_LEN: u32 = 2048;
+/// Reject combinations no framework supports.
+pub fn validate(setup: &TrainingSetup) -> Result<()> {
+    if setup.method == FinetuneMethod::Full && setup.quantization != QuantLevel::None {
+        bail!(
+            "full fine-tuning of a quantized model is not supported by mainstream frameworks — \
+             use `--method qlora` (4-bit base + adapters) or drop `--quantization`"
+        );
+    }
+    if setup.method == FinetuneMethod::Qlora && setup.quantization == QuantLevel::EightBit {
+        bail!("QLoRA uses a 4-bit base model; use `--method lora --quantization 8bit` for 8-bit");
+    }
+    Ok(())
+}
 
-/// LoRA adapter parameters as a fraction of total model parameters (~1%).
-const LORA_ADAPTER_FRACTION: f64 = 0.01;
+/// Effective weight quantisation (QLoRA implies 4-bit).
+pub fn effective_quant(setup: &TrainingSetup) -> QuantLevel {
+    if setup.method == FinetuneMethod::Qlora {
+        QuantLevel::FourBit
+    } else {
+        setup.quantization
+    }
+}
 
-/// Factor by which gradient checkpointing reduces activation memory.
-/// Checkpointing stores only O(√L) activations rather than all L layers.
-const GRAD_CKPT_FACTOR: f64 = 4.0;
+/// LoRA adapter parameters for rank `LORA_RANK` on q,k,v,o and the MLP projections.
+pub fn lora_params(spec: &ModelSpec) -> f64 {
+    let h = spec.hidden_size as f64;
+    let q = spec.num_heads as f64 * spec.head_dim as f64;
+    let kv = spec.num_kv_heads as f64 * spec.head_dim as f64;
+    let f = spec.intermediate_size as f64;
+    let per_layer = (h + q) + 2.0 * (h + kv) + (q + h) + 3.0 * (h + f);
+    LORA_RANK * per_layer * spec.num_layers as f64
+}
 
-/// Estimate the full VRAM breakdown for a training run.
-///
-/// All returned values are in GiB. The caller should add a safety margin
-/// (e.g. 5%) on top of `total_gib` before comparing against GPU VRAM.
-///
-/// Assumptions:
-/// - Gradient checkpointing is always enabled (reduces activation memory ~4×).
-/// - Sequence length is `DEFAULT_SEQ_LEN` (2048 tokens).
-/// - Loss scaling for mixed precision is not counted (negligible).
-pub fn estimate(
-    spec: &ModelSpec,
-    method: FinetuneMethod,
-    optimizer_lib: OptimizerLib,
-    quant: QuantLevel,
-    batch_size: u32,
-) -> VramBreakdown {
+pub fn estimate(spec: &ModelSpec, setup: &TrainingSetup, gpu_count: u32) -> VramBreakdown {
+    let n = gpu_count.max(1) as f64;
     let params = spec.param_count_b * 1e9;
-    let bytes_per_weight = bytes_per_param(quant);
+    let emb = spec.embedding_params().min(params);
+    let quant = effective_quant(setup);
+    let mut notes = Vec::new();
 
-    //  Model weights
-    let weights_gib = params * bytes_per_weight / GIB;
-
-    //  Trainable parameter count
-    // Full fine-tuning: all parameters have gradients.
-    // LoRA / QLoRA: only the small adapter matrices are trained (~1% of total).
-    let trainable_params = match method {
-        FinetuneMethod::Full => params,
-        FinetuneMethod::Lora | FinetuneMethod::Qlora => params * LORA_ADAPTER_FRACTION,
+    let weights_bytes = match quant {
+        QuantLevel::None => params * 2.0,
+        QuantLevel::EightBit => (params - emb) * 1.0 + emb * 2.0,
+        QuantLevel::FourBit => (params - emb) * 0.53 + emb * 2.0,
     };
 
-    //  Gradients (bf16 — 2 bytes per trainable parameter)
-    let gradients_gib = trainable_params * 2.0 / GIB;
-
-    //  Optimizer states (fp32 Adam: first + second moment = 8 bytes/param)
-    let optimizer_gib = trainable_params * 8.0 / GIB;
-
-    //  Activations (gradient checkpointing assumed)─
-    // Without checkpointing: batch × seq × hidden × layers × 2 bytes.
-    // With checkpointing:    divide by GRAD_CKPT_FACTOR (~4× reduction).
-    let seq_len = DEFAULT_SEQ_LEN as f64;
-    let activations_gib = batch_size as f64
-        * seq_len
-        * spec.hidden_size as f64
-        * spec.num_layers as f64
-        * 2.0 // bf16
-        / GRAD_CKPT_FACTOR
-        / GIB;
-
-    //  KV cache
-    // 2 (K+V) × layers × kv_heads × head_dim × seq_len × batch × 2 bytes (bf16)
-    let head_dim = spec.hidden_size as f64 / spec.num_heads.max(1) as f64;
-    let kv_cache_gib = 2.0
-        * spec.num_layers as f64
-        * spec.num_kv_heads as f64
-        * head_dim
-        * seq_len
-        * batch_size as f64
-        * 2.0 // bf16
-        / GIB;
-
-    //  Sub-total before library savings─
-    let subtotal = weights_gib + gradients_gib + optimizer_gib + activations_gib + kv_cache_gib;
-
-    //  Library efficiency savings─
-    // Negative value — represents memory freed relative to the sub-total.
-    let library_savings_gib = match optimizer_lib {
-        // Unsloth: memory-efficient attention + optimized quantization, ~45% reduction.
-        OptimizerLib::Unsloth => -subtotal * 0.45,
-        // DeepSpeed ZeRO-2: shards optimizer states + gradients — conservative 20% on
-        // single GPU (most benefit comes from multi-GPU sharding, not counted here).
-        OptimizerLib::DeepSpeed => -subtotal * 0.20,
-        OptimizerLib::None => 0.0,
+    let (grad_bytes, opt_bytes) = match setup.method {
+        FinetuneMethod::Full => (params * 2.0, params * 12.0),
+        FinetuneMethod::Lora | FinetuneMethod::Qlora => {
+            let a = lora_params(spec);
+            notes.push(format!(
+                "LoRA rank {LORA_RANK:.0} on all linear layers ({:.0}M trainable params)",
+                a / 1e6
+            ));
+            (a * 4.0, a * 12.0)
+        }
     };
 
-    let total_gib = subtotal + library_savings_gib;
+    let b = setup.micro_batch as f64;
+    let s = setup.seq_len as f64;
+    let h = spec.hidden_size as f64;
+    let f = spec.intermediate_size as f64;
+    let l = spec.num_layers as f64;
+    let mut act_bytes = l * b * s * h * 2.0 + b * s * (16.0 * h + 6.0 * f);
+    let mut logit_bytes = b * s * spec.vocab_size as f64 * (2.0 + 4.0);
+    notes.push(format!(
+        "gradient checkpointing + FlashAttention, {} tokens × micro-batch {}",
+        setup.seq_len, setup.micro_batch
+    ));
 
+    let (mut w, mut g, mut o) = (weights_bytes, grad_bytes, opt_bytes);
+    match setup.optimizer_lib {
+        OptimizerLib::DeepSpeed if n > 1.0 => {
+            w /= n;
+            g /= n;
+            o /= n;
+            notes.push(format!(
+                "DeepSpeed ZeRO-3: weights, gradients and optimizer state sharded over {n:.0} GPUs"
+            ));
+        }
+        OptimizerLib::DeepSpeed => {
+            o = 0.0;
+            notes.push("DeepSpeed ZeRO-Offload: optimizer state in CPU RAM".into());
+        }
+        OptimizerLib::Unsloth => {
+            act_bytes *= 0.5;
+            logit_bytes *= 0.25;
+            notes.push(
+                "Unsloth: activation offloading and chunked cross-entropy (≈−50 % activations, \
+                 −75 % logits)"
+                    .into(),
+            );
+        }
+        OptimizerLib::None => {}
+    }
+
+    let subtotal = w + g + o + act_bytes + logit_bytes;
+    let overhead = CUDA_CONTEXT_GIB * GIB + subtotal * FRAGMENTATION;
     VramBreakdown {
-        weights_gib,
-        gradients_gib,
-        optimizer_gib,
-        activations_gib,
-        kv_cache_gib,
-        library_savings_gib,
-        total_gib,
+        gpu_count: gpu_count.max(1),
+        weights_gib: w / GIB,
+        gradients_gib: g / GIB,
+        optimizer_gib: o / GIB,
+        activations_gib: act_bytes / GIB,
+        logits_gib: logit_bytes / GIB,
+        overhead_gib: overhead / GIB,
+        total_gib: (subtotal + overhead) / GIB,
+        notes,
     }
 }
 
-/// Return the bytes required to store one model parameter at the given quantization.
-fn bytes_per_param(quant: QuantLevel) -> f64 {
-    match quant {
-        QuantLevel::None => 2.0,     // bfloat16
-        QuantLevel::EightBit => 1.0, // int8
-        QuantLevel::FourBit => 0.5,  // 4-bit NF4
-    }
-}
+/// Common GPU memory sizes (GiB).
+const VRAM_TIERS: &[u32] = &[8, 12, 16, 24, 32, 40, 48, 80, 94, 141, 180];
 
-/// Standard GPU VRAM tiers in GiB.
-const VRAM_TIERS: &[u32] = &[8, 10, 12, 16, 20, 24, 40, 48, 80];
-
-/// Return all standard VRAM tiers (as "NGB" strings) that are large enough to
-/// fit `required_gib` with a 5% safety margin.
 pub fn fitting_tiers(required_gib: f64) -> Vec<String> {
-    let with_margin = required_gib * 1.05;
     VRAM_TIERS
         .iter()
-        .filter(|&&t| t as f64 >= with_margin)
+        .filter(|&&t| t as f64 >= required_gib)
         .map(|&t| format!("{t}GB"))
         .collect()
 }
@@ -128,153 +148,155 @@ pub fn fitting_tiers(required_gib: f64) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::model::ModelSpec;
+    use crate::plan::model::ParamSource;
 
-    fn llama_7b() -> ModelSpec {
+    fn llama8b() -> ModelSpec {
         ModelSpec {
-            model_id: "meta-llama/Llama-2-7b".to_string(),
-            param_count_b: 7.0,
+            model_id: "meta-llama/Llama-3.1-8B".into(),
+            param_count_b: 8.03,
+            active_param_count_b: 8.03,
+            param_source: ParamSource::HubSafetensors,
             num_layers: 32,
             hidden_size: 4096,
+            intermediate_size: 14336,
             num_heads: 32,
-            num_kv_heads: 32,
+            num_kv_heads: 8,
+            head_dim: 128,
+            vocab_size: 128_256,
+            tie_word_embeddings: false,
+            architecture_estimated: false,
+        }
+    }
+
+    fn setup(method: FinetuneMethod, lib: OptimizerLib, quant: QuantLevel) -> TrainingSetup {
+        TrainingSetup {
+            method,
+            optimizer_lib: lib,
+            quantization: quant,
+            micro_batch: 1,
+            seq_len: 2048,
         }
     }
 
     #[test]
-    fn full_precision_7b_weights_approx_13gib() {
-        // 7 × 10^9 × 2 bytes / 2^30 ≈ 13.04 GiB
-        let bd = estimate(
-            &llama_7b(),
+    fn full_finetune_follows_16_bytes_per_param() {
+        let v = estimate(
+            &llama8b(),
+            &setup(FinetuneMethod::Full, OptimizerLib::None, QuantLevel::None),
+            1,
+        );
+        let states = v.weights_gib + v.gradients_gib + v.optimizer_gib;
+        assert!((states - 8.03e9 * 16.0 / GIB).abs() < 0.01);
+        assert!(
+            v.total_gib > 120.0,
+            "8B full FT needs >1 80 GB GPU: {}",
+            v.total_gib
+        );
+    }
+
+    #[test]
+    fn lora_8b_fits_24gb_and_qlora_fits_less() {
+        let lora = estimate(
+            &llama8b(),
+            &setup(FinetuneMethod::Lora, OptimizerLib::None, QuantLevel::None),
+            1,
+        );
+        assert!(
+            lora.total_gib > 16.0 && lora.total_gib < 24.0,
+            "{}",
+            lora.total_gib
+        );
+        let q = estimate(
+            &llama8b(),
+            &setup(FinetuneMethod::Qlora, OptimizerLib::None, QuantLevel::None),
+            1,
+        );
+        assert!(q.total_gib < 12.0 && q.total_gib > 5.0, "{}", q.total_gib);
+        assert!(q.weights_gib < lora.weights_gib / 2.5);
+    }
+
+    #[test]
+    fn logits_matter_for_large_vocab() {
+        let v = estimate(
+            &llama8b(),
+            &setup(FinetuneMethod::Lora, OptimizerLib::None, QuantLevel::None),
+            1,
+        );
+        // 2048 × 128256 × 6 bytes ≈ 1.47 GiB
+        assert!((v.logits_gib - 1.47).abs() < 0.02, "{}", v.logits_gib);
+    }
+
+    #[test]
+    fn deepspeed_shards_across_gpus() {
+        let plain = estimate(
+            &llama8b(),
+            &setup(FinetuneMethod::Full, OptimizerLib::None, QuantLevel::None),
+            8,
+        );
+        let s = setup(
+            FinetuneMethod::Full,
+            OptimizerLib::DeepSpeed,
+            QuantLevel::None,
+        );
+        let one = estimate(&llama8b(), &s, 1);
+        let eight = estimate(&llama8b(), &s, 8);
+        assert!(
+            eight.total_gib < plain.total_gib / 5.0,
+            "replicated DDP does not shard"
+        );
+        assert!(eight.total_gib < one.total_gib);
+        assert!(
+            one.optimizer_gib == 0.0,
+            "single-GPU DeepSpeed offloads optimizer state"
+        );
+        assert!(eight.total_gib < 40.0, "{}", eight.total_gib);
+    }
+
+    #[test]
+    fn unsloth_reduces_activation_memory() {
+        let base = estimate(
+            &llama8b(),
+            &setup(FinetuneMethod::Lora, OptimizerLib::None, QuantLevel::None),
+            1,
+        );
+        let un = estimate(
+            &llama8b(),
+            &setup(
+                FinetuneMethod::Lora,
+                OptimizerLib::Unsloth,
+                QuantLevel::None,
+            ),
+            1,
+        );
+        assert!(un.total_gib < base.total_gib);
+        assert_eq!(un.weights_gib, base.weights_gib);
+    }
+
+    #[test]
+    fn invalid_combinations_are_rejected() {
+        assert!(validate(&setup(
             FinetuneMethod::Full,
             OptimizerLib::None,
-            QuantLevel::None,
-            1,
-        );
-        assert!(
-            (bd.weights_gib - 13.04).abs() < 0.1,
-            "expected ~13.0 GiB, got {:.2}",
-            bd.weights_gib
-        );
-    }
-
-    #[test]
-    fn fourbit_weights_half_of_eightbit() {
-        let bd8 = estimate(
-            &llama_7b(),
+            QuantLevel::FourBit
+        ))
+        .is_err());
+        assert!(validate(&setup(
+            FinetuneMethod::Qlora,
+            OptimizerLib::None,
+            QuantLevel::EightBit
+        ))
+        .is_err());
+        assert!(validate(&setup(
             FinetuneMethod::Lora,
             OptimizerLib::None,
-            QuantLevel::EightBit,
-            1,
-        );
-        let bd4 = estimate(
-            &llama_7b(),
-            FinetuneMethod::Lora,
-            OptimizerLib::None,
-            QuantLevel::FourBit,
-            1,
-        );
-        assert!(
-            (bd8.weights_gib / bd4.weights_gib - 2.0).abs() < 0.01,
-            "4-bit weights should be exactly half of 8-bit"
-        );
+            QuantLevel::EightBit
+        ))
+        .is_ok());
     }
 
     #[test]
-    fn lora_gradients_are_about_1pct_of_full() {
-        let bd_full = estimate(
-            &llama_7b(),
-            FinetuneMethod::Full,
-            OptimizerLib::None,
-            QuantLevel::None,
-            1,
-        );
-        let bd_lora = estimate(
-            &llama_7b(),
-            FinetuneMethod::Lora,
-            OptimizerLib::None,
-            QuantLevel::None,
-            1,
-        );
-        let ratio = bd_lora.gradients_gib / bd_full.gradients_gib;
-        assert!(
-            (ratio - LORA_ADAPTER_FRACTION).abs() < 0.001,
-            "LoRA gradient ratio should equal LORA_ADAPTER_FRACTION, got {ratio:.4}"
-        );
-    }
-
-    #[test]
-    fn unsloth_reduces_total_by_40_to_60_pct() {
-        let bd_none = estimate(
-            &llama_7b(),
-            FinetuneMethod::Lora,
-            OptimizerLib::None,
-            QuantLevel::FourBit,
-            1,
-        );
-        let bd_unsloth = estimate(
-            &llama_7b(),
-            FinetuneMethod::Lora,
-            OptimizerLib::Unsloth,
-            QuantLevel::FourBit,
-            1,
-        );
-        let reduction = 1.0 - bd_unsloth.total_gib / bd_none.total_gib;
-        assert!(
-            (0.40..=0.60).contains(&reduction),
-            "Unsloth should reduce by 40–60%, got {:.1}%",
-            reduction * 100.0
-        );
-    }
-
-    #[test]
-    fn library_savings_is_negative() {
-        let bd = estimate(
-            &llama_7b(),
-            FinetuneMethod::Lora,
-            OptimizerLib::Unsloth,
-            QuantLevel::FourBit,
-            1,
-        );
-        assert!(
-            bd.library_savings_gib < 0.0,
-            "savings should be expressed as a negative delta"
-        );
-    }
-
-    #[test]
-    fn total_equals_sum_of_components() {
-        let bd = estimate(
-            &llama_7b(),
-            FinetuneMethod::Full,
-            OptimizerLib::None,
-            QuantLevel::None,
-            1,
-        );
-        let computed = bd.weights_gib
-            + bd.gradients_gib
-            + bd.optimizer_gib
-            + bd.activations_gib
-            + bd.kv_cache_gib
-            + bd.library_savings_gib;
-        assert!((computed - bd.total_gib).abs() < 1e-9, "sum mismatch");
-    }
-
-    #[test]
-    fn fitting_tiers_excludes_insufficient_tiers() {
-        let tiers = fitting_tiers(11.0); // 11 × 1.05 = 11.55 — needs ≥ 12 GB
-        assert!(tiers.contains(&"12GB".to_string()));
-        assert!(!tiers.contains(&"10GB".to_string()));
-        assert!(!tiers.contains(&"8GB".to_string()));
-    }
-
-    #[test]
-    fn fitting_tiers_all_for_tiny_requirement() {
-        let tiers = fitting_tiers(1.0);
-        assert_eq!(
-            tiers.len(),
-            VRAM_TIERS.len(),
-            "all tiers fit a 1 GiB requirement"
-        );
+    fn tiers() {
+        assert_eq!(fitting_tiers(20.0)[0], "24GB");
+        assert!(fitting_tiers(500.0).is_empty());
     }
 }

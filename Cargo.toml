@@ -1,9 +1,9 @@
 [package]
 name = "calibrate"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Prajwal Amte <prajwalamte@gmail.com>"]
-description = "GPU training efficiency analyzer — real-time MFU, bottleneck detection, and actionable recommendations for NVIDIA GPU workloads"
+description = "GPU training efficiency analyzer — MFU, bottleneck detection, cost planning and exporters for NVIDIA and Apple Silicon workloads"
 license = "MIT"
 repository = "https://github.com/PrajwalAmte/Calibrate"
 homepage = "https://github.com/PrajwalAmte/Calibrate"
@@ -11,7 +11,7 @@ documentation = "https://github.com/PrajwalAmte/Calibrate#readme"
 keywords = ["gpu", "mfu", "deep-learning", "nvml", "profiling"]
 categories = ["command-line-utilities", "development-tools::profiling"]
 readme = "README.md"
-rust-version = "1.75"
+rust-version = "1.88"
 exclude = [
     ".github/",
     "*.md.bak",
@@ -43,15 +43,22 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# HTTP client for GPU spec DB (blocking; called once at startup)
-reqwest = { version = "0.12", features = ["blocking", "json"] }
+# HTTP client (spec DB, HF Hub, cloud pricing, OTLP export).
+# rustls with the OS trust store: no OpenSSL dependency and corporate CAs work.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots", "http2", "charset"] }
+
+# Config file parsing (~/.config/calibrate/config.toml)
+toml = "0.8"
+
+# Runtime loading of optional NVML GPM symbols (absent on older drivers)
+libloading = "0.8"
 
 # MPSC channel bridging std::thread → tokio
 flume = "0.11"
 
 # Structured diagnostics
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
 # Faster RwLock / Mutex
 parking_lot = "0.12"
@@ -82,6 +89,8 @@ metal = "0.29"
 
 [dev-dependencies]
 proptest = "1"
+assert_cmd = "2"
+predicates = "3"
 
 [profile.release]
 lto = true

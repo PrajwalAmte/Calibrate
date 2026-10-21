@@ -5,7 +5,7 @@ use tracing::warn;
 
 use crate::bench::input::BenchInput;
 use crate::bench::memory::{MemorySnapshot, PeakMemoryTracker};
-use crate::bench::runtime::Runtime;
+use crate::bench::runtime::{Runtime, SubprocessSettings};
 use crate::bench::stats::StatAccumulator;
 use crate::bench::{BenchResult, SkippedRuntime};
 
@@ -23,6 +23,8 @@ pub struct HarnessConfig {
     /// Maximum allowed wall-clock time for one (runtime, batch_size) pair
     /// before the harness reduces the iteration count automatically.
     pub max_total_duration: Duration,
+    /// Settings forwarded to runtimes that measure in a subprocess.
+    pub subprocess: SubprocessSettings,
 }
 
 impl Default for HarnessConfig {
@@ -33,6 +35,7 @@ impl Default for HarnessConfig {
             throughput_window: Duration::from_secs(5),
             gpu_device_index: None,
             max_total_duration: Duration::from_secs(600), // 10 minutes
+            subprocess: SubprocessSettings::default(),
         }
     }
 }
@@ -51,6 +54,7 @@ pub fn run_runtime_benchmarks(
 ) -> (Vec<BenchResult>, Vec<SkippedRuntime>) {
     let mut results = Vec::new();
     let mut skipped = Vec::new();
+    runtime.configure(&config.subprocess);
 
     for &batch_size in batch_sizes {
         let input = match inputs.iter().find(|(b, _)| *b == batch_size) {
@@ -82,6 +86,8 @@ pub fn run_runtime_benchmarks(
                     warmup_stable_at: 0,
                     flagged_unreliable: false,
                     oom: true,
+                    synthetic: runtime.synthetic(),
+                    memory_source: "none".into(),
                 });
                 continue;
             }
@@ -142,6 +148,8 @@ pub fn run_runtime_benchmarks(
                         warmup_stable_at: 0,
                         flagged_unreliable: false,
                         oom: true,
+                        synthetic: runtime.synthetic(),
+                        memory_source: "none".into(),
                     });
                     continue;
                 }
@@ -176,13 +184,20 @@ pub fn run_runtime_benchmarks(
                 );
             }
 
-            // Memory: take a snapshot immediately after subprocess returns.
-            let post_snapshot = MemorySnapshot::take(config.gpu_device_index);
-            let delta = post_snapshot.delta_from(&baseline);
-            let (peak_memory_mib, memory_delta_mib) = if config.gpu_device_index.is_some() {
-                (post_snapshot.vram_used_mib, delta.vram_delta_mib)
-            } else {
-                (post_snapshot.rss_mib, delta.rss_delta_mib)
+            // Memory: the runtime measured its own peak inside the child
+            // process; calibrate's RSS says nothing about the model.
+            let (peak_memory_mib, memory_delta_mib, memory_source) = match runtime.reported_memory()
+            {
+                Some(m) => match m.device_mib {
+                    Some(d) => (d, d, "device"),
+                    None => (m.rss_mib, m.rss_mib, "host_rss"),
+                },
+                None if config.gpu_device_index.is_some() => {
+                    let post = MemorySnapshot::take(config.gpu_device_index);
+                    let delta = post.delta_from(&baseline);
+                    (post.vram_used_mib, delta.vram_delta_mib, "nvml")
+                }
+                None => (0.0, 0.0, "none"),
             };
 
             runtime.unload();
@@ -198,6 +213,8 @@ pub fn run_runtime_benchmarks(
                 warmup_stable_at: 0, // managed inside subprocess
                 flagged_unreliable,
                 oom: false,
+                synthetic: runtime.synthetic(),
+                memory_source: memory_source.into(),
             });
             continue;
         }
@@ -219,6 +236,8 @@ pub fn run_runtime_benchmarks(
                     warmup_stable_at: 0,
                     flagged_unreliable: false,
                     oom: true,
+                    synthetic: runtime.synthetic(),
+                    memory_source: "none".into(),
                 });
                 continue;
             }
@@ -301,11 +320,12 @@ pub fn run_runtime_benchmarks(
         // --- Memory delta ------------------------------------------------
         let peak_snapshot = peak_tracker.peak();
         let delta = peak_snapshot.delta_from(&baseline);
-        let (peak_memory_mib, memory_delta_mib) = if config.gpu_device_index.is_some() {
-            (peak_snapshot.vram_used_mib, delta.vram_delta_mib)
-        } else {
-            (peak_snapshot.rss_mib, delta.rss_delta_mib)
-        };
+        let (peak_memory_mib, memory_delta_mib, memory_source) =
+            if config.gpu_device_index.is_some() || cfg!(target_os = "macos") {
+                (peak_snapshot.vram_used_mib, delta.vram_delta_mib, "nvml")
+            } else {
+                (peak_snapshot.rss_mib, delta.rss_delta_mib, "host_rss")
+            };
 
         // --- Unload and cool down ----------------------------------------
         runtime.unload();
@@ -321,6 +341,8 @@ pub fn run_runtime_benchmarks(
             warmup_stable_at,
             flagged_unreliable,
             oom,
+            synthetic: runtime.synthetic(),
+            memory_source: memory_source.into(),
         });
     }
 
@@ -438,8 +460,14 @@ fn budget_guard(
 
 /// Return `true` when the error message suggests an out-of-memory condition.
 fn is_oom_error(e: &anyhow::Error) -> bool {
-    let msg = format!("{e}").to_lowercase();
-    msg.contains("out of memory") || msg.contains("cuda error") || msg.contains("oom")
+    let msg = format!("{e:#}").to_lowercase();
+    msg.contains("out of memory")
+        || msg.contains("cuda_error_out_of_memory")
+        || msg.contains("cudaerrormemoryallocation")
+        || msg.contains("failed to allocate")
+        || msg
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| w == "oom")
 }
 
 /// Log a warning if processes other than the current one are using the GPU.
@@ -518,6 +546,14 @@ mod tests {
     fn oom_error_does_not_match_unrelated_error() {
         let e = anyhow::anyhow!("model file not found");
         assert!(!is_oom_error(&e));
+        // Regression: any CUDA error used to be classified as OOM, and "oom"
+        // matched inside ordinary words.
+        assert!(!is_oom_error(&anyhow::anyhow!(
+            "CUDA error: device-side assert triggered"
+        )));
+        assert!(!is_oom_error(&anyhow::anyhow!(
+            "no room in the zoom config"
+        )));
     }
 
     #[test]

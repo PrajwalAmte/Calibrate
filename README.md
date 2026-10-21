@@ -1,14 +1,36 @@
 # calibrate
 
-GPU training efficiency analyzer for NVIDIA and Apple Silicon workloads. Attach to a running training job and immediately see your Model FLOP Utilization (MFU), where compute time is being lost, and the single change that would fix it. Compare inference runtimes. Plan and cost out your next fine-tuning run against live cloud GPU pricing.
+GPU training efficiency analyzer for NVIDIA and Apple Silicon. Attach to a
+running training job and see how much of the GPU's peak it really uses, where
+the time goes, and the one change most likely to help. Benchmark inference
+runtimes. Plan and cost a fine-tuning run against live cloud pricing.
 
+```bash
+calibrate watch --pid 38291 --cost-per-hour 2.49        # live TUI (q / Esc / Ctrl+C to quit)
+calibrate watch --process-name "train\.py" --output json  # versioned JSON lines
+calibrate watch --gpus all --output none --prometheus-listen 0.0.0.0:9400   # node agent
+calibrate bench --model ./my-model-dir --batch-sizes 1,8
+calibrate plan  --model meta-llama/Llama-3.1-8B --method qlora --dataset-rows 50000
 ```
-calibrate watch --pid 38291 --cost-per-hour 0.34
-calibrate watch --process-name "train\.py"
-calibrate watch --auto
-calibrate bench --model ./model.safetensors --batch-size 8
-calibrate plan  --model meta-llama/Llama-3-8B --method lora --optimizer unsloth --dataset-rows 50000
-```
+
+---
+
+## What the numbers mean
+
+MFU (Model FLOP Utilization) is only as good as its source, so calibrate
+always says which one it used:
+
+| Source | How | When | Shown as |
+|---|---|---|---|
+| **Instrumented** | FLOPs and step times reported by the [Python hook](docs/hook.md) | any GPU, three lines of code | `MFU` |
+| **Tensor-active** | tensor-core pipe activity × clock, from NVML GPM or DCGM | Hopper+ (GPM), A100/L4/L40S… (DCGM) | `MFU (est., tensor-core activity)` |
+| **Kernel-busy** | NVML "GPU utilization" × clock | everywhere | `MFU upper bound (GPU busy time)` |
+
+NVML's "GPU utilization" only says that *some* kernel was running; a GPU can be
+100 % busy at 30 % MFU. calibrate therefore never calls a busy-time figure
+"well optimized" — it reports it as an upper bound and tells you how to get a
+real measurement. Metrics a platform cannot provide (e.g. temperature on
+macOS) are shown as N/A, never as 0. Details: [docs/metrics.md](docs/metrics.md).
 
 ---
 
@@ -16,260 +38,169 @@ calibrate plan  --model meta-llama/Llama-3-8B --method lora --optimizer unsloth 
 
 | Command | Description |
 |---|---|
-| `diagnose` | Check NVIDIA/Apple GPU driver stack and print actionable fix instructions |
-| `watch` | Attach to a training process, measure MFU and bottlenecks in real time (Linux/NVIDIA · macOS/Apple Silicon) |
-| `bench` | Compare inference latency across runtime backends (Candle, Metal, ONNX, TorchScript, llama.cpp, TensorRT) |
-| `plan`  | Fetch live GPU cloud prices and recommend the cheapest option for your fine-tuning workload |
-
----
-
-## Architecture
-
-```mermaid
-graph TD
-    CLI["CLI — clap<br/>watch | bench | plan"]
-
-    CLI --> CmdWatch["commands/watch.rs<br/>orchestrate session lifecycle"]
-    CLI --> CmdBench["commands/bench.rs<br/>harness loop · Runtime trait"]
-    CLI --> CmdPlan["commands/plan.rs<br/>resolve → vram → providers → rank"]
-
-    CmdWatch --> Session["session/<br/>state.rs · lifecycle.rs<br/>typestate session machine"]
-    Session --> Collectors["collectors/<br/>nvml.rs — GPU via NVML  [Linux]<br/>proc.rs — CPU via /proc  [Linux]<br/>cpu_only.rs — no-GPU fallback  [Linux]<br/>apple_gpu.rs — GPU via IOKit  [macOS]"]
-    Collectors --> Metrics["metrics/<br/>mfu.rs · breakdown.rs<br/>window.rs · units.rs"]
-    Metrics --> Analysis["analysis/<br/>bottleneck.rs<br/>recommendations.rs"]
-
-    CmdBench --> BenchCore["bench/<br/>harness.rs · runtime.rs<br/>stats.rs · memory.rs<br/>compare.rs"]
-    BenchCore --> Runtimes["bench/runtimes/<br/>candle · metal [macOS]<br/>onnxruntime · torchscript<br/>llamacpp · tensorrt"]
-
-    CmdPlan --> PlanModel["plan/model/<br/>resolver.rs<br/>HF Hub + local config.json"]
-    CmdPlan --> PlanVram["plan/vram/<br/>estimator.rs<br/>weights + grads + optimizer<br/>+ activations + KV cache"]
-    CmdPlan --> PlanProviders["plan/providers/<br/>runpod.rs · lambda.rs<br/>vastai.rs<br/>tokio::join! concurrent fetch"]
-    CmdPlan --> PlanDuration["plan/duration/<br/>estimator.rs<br/>6×params FLOP formula<br/>GPU TFLOPS lookup"]
-
-    Analysis --> Output
-    BenchCore --> Output
-    CmdPlan --> Output
-
-    Output["output/<br/>terminal.rs — live ratatui TUI<br/>json.rs — structured JSON<br/>summary.rs — end-of-session<br/>bench_terminal.rs · bench_markdown.rs<br/>plan_terminal.rs · plan_json.rs"]
-
-    GpuSpecs["gpu_specs/<br/>fallback_specs.json<br/>45 GPUs: NVIDIA + Apple Silicon<br/>normalize_for_match · match_score"]
-    CmdWatch --> GpuSpecs
-    CmdPlan --> GpuSpecs
-```
+| `diagnose` | Check the driver stack, profiling support (GPM/DCGM), process visibility, config and network |
+| `watch` | Live efficiency analysis of a process tree (`--pid`, `--process-name`, `--auto`), of devices (`--gpus`), or of a recorded trace (`--replay`) |
+| `probe` | Stream raw sample ticks as JSON to verify collection on a new machine |
+| `bench` | Compare inference runtimes (Transformers, TorchScript, ONNX Runtime, TensorRT, llama.cpp) |
+| `plan` | Estimate per-GPU VRAM, training time and cost across RunPod, Lambda and Vast.ai, or your own price list |
 
 ---
 
 ## Install
 
-**Pre-built binary (Linux x86-64) — no Rust required**
+**Release binaries** (from v0.2.0) — Linux x86-64 / ARM64 (glibc ≥ 2.17) and macOS:
 
 ```bash
-curl -LsSf https://github.com/PrajwalAmte/Calibrate/releases/latest/download/calibrate-linux-x86_64 \
-  -o calibrate && chmod +x calibrate && sudo mv calibrate /usr/local/bin/
+VERSION=v0.2.0 TARGET=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu, aarch64-apple-darwin
+curl -LO https://github.com/PrajwalAmte/Calibrate/releases/download/$VERSION/calibrate-$VERSION-$TARGET.tar.gz
+curl -LO https://github.com/PrajwalAmte/Calibrate/releases/download/$VERSION/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+tar xzf calibrate-$VERSION-$TARGET.tar.gz && sudo mv calibrate-$VERSION-$TARGET/calibrate /usr/local/bin/
 ```
 
-Or download directly from the [releases page](https://github.com/PrajwalAmte/Calibrate/releases).
+Every artifact has a signed build-provenance attestation
+(`gh attestation verify <file> --repo PrajwalAmte/Calibrate`).
 
-**With Cargo (requires Rust 1.75+)**
+**Container image** (linux/amd64, linux/arm64):
 
 ```bash
-cargo install calibrate
+docker run --rm --gpus all ghcr.io/prajwalamte/calibrate:0.2.0 diagnose
 ```
 
-**Build from source**
+**From source** (Rust 1.88+):
 
 ```bash
-git clone https://github.com/PrajwalAmte/Calibrate
-cd calibrate/calibrate
-cargo build --release
-./target/release/calibrate --help
+cargo install --git https://github.com/PrajwalAmte/Calibrate --locked
+```
+
+**Python hook** (optional, for measured MFU): `pip install ./python` from a checkout.
+
+On Linux, NVML (`libnvidia-ml.so.1`, shipped with the NVIDIA driver) is loaded
+at runtime — the binary has no hard dependency on it, and no OpenSSL
+dependency (TLS uses rustls with the system trust store).
+
+---
+
+## calibrate watch
+
+```
+Target (exactly one):
+  -p, --pid <PID>              Attach to a process; children (ranks, DataLoader workers) included
+  -n, --process-name <REGEX>   Match the command line; a launcher and its ranks resolve to the launcher
+  -a, --auto                   Find training jobs (python + torch/jax/…, torchrun, accelerate, deepspeed)
+      --gpus <all|0,1,…>       Device-level mode: no PID needed (node agents, containers)
+      --replay <FILE>          Replay a trace recorded with --record-raw
+
+Options (combine freely with any target):
+  -c, --cost-per-hour <USD>    Dollar cost of running below target
+  -i, --interval <SECS>        0.1 – 3600 [default: 2]
+      --target-mfu <PCT>       [default: 45]
+      --duration <SECS>        Stop automatically
+  -o, --output <FORMAT>        terminal | json | none
+      --metrics-source <SRC>   auto | gpm | dcgm | nvml
+      --record <FILE>          Append snapshots (JSONL)
+      --record-raw <FILE>      Append raw ticks (replayable)
+      --prometheus-listen <ADDR>   Serve /metrics and /healthz
+      --otlp-endpoint <URL>    Push to an OpenTelemetry collector (OTLP/HTTP)
+      --no-children            Only the target PID itself
+```
+
+The TUI shows the MFU source, a time breakdown (measured with the hook,
+otherwise labelled *inferred from sampling*), per-GPU status for multi-GPU
+jobs, throttle reasons, memory growth, and one recommendation. SIGTERM and
+SIGINT stop it cleanly, so it works under systemd and Kubernetes.
+
+**Measured MFU in three lines** ([docs/hook.md](docs/hook.md)):
+
+```python
+import calibrate_hook
+hook = calibrate_hook.start(model=model, seq_len=2048)
+for batch in loader:
+    with hook.step(tokens=batch["input_ids"].numel()):
+        ...  # forward, backward, optimizer step
 ```
 
 ---
 
-## Usage: calibrate watch
+## calibrate bench
 
 ```
-calibrate watch --pid <PID>             [OPTIONS]
-calibrate watch --process-name <REGEX>  [OPTIONS]
-calibrate watch --auto                  [OPTIONS]
-
-Target (exactly one required):
-  -p, --pid <PID>               Attach to a known process ID
-  -n, --process-name <PATTERN>  Attach by regex match on the command line
-  -a, --auto                    Auto-discover training processes; pick interactively if >1
-
-Options:
-  -c, --cost-per-hour <USD/HR>  Hourly GPU cost (enables dollar waste display)
-  -i, --interval <SECS>         Sampling interval [default: 2]
-  -o, --output <FORMAT>         terminal | json  [default: terminal]
-  -h, --help                    Print help
+calibrate bench --model <FILE|DIR> [--runtimes transformers,torchscript,...]
+                [--batch-sizes 1,8,32] [--iterations 100] [--warmup 20]
+                [--seq-len 512] [--input-shape 3,224,224] [--timeout 600]
+                [--optimize-for latency|throughput|memory] [--output terminal|json|markdown]
+                [--save base.json] [--compare base.json]
 ```
 
-**Finding a process without knowing its PID**
+| Format | Runtimes |
+|---|---|
+| Hugging Face directory (`config.json` + safetensors) | `transformers` |
+| `.pt` / `.pth` TorchScript | `torchscript` (input shape inferred from the first layer) |
+| `.onnx` | `onnxruntime`, `tensorrt` |
+| `.gguf` | `llamacpp` (`llama-bench`) |
 
-```bash
-# Let calibrate find and list all active training jobs:
-calibrate watch --auto
-
-# Or match by script name (supports full regex):
-calibrate watch --process-name "train\.py"
-calibrate watch --process-name "minerva|chess"
-
-# Multiple matches → calibrate lists them and exits:
-#   [ 1]  PID  31760  python3 training/train.py --data ...
-#   [ 2]  PID  31891  python3 training/train_v2.py --data ...
-#   Enter number [1-2]:
-#
-# Single match → attaches immediately with a confirmation line:
-#   [calibrate] Auto-detected training process:
-#     PID  31760  python3 training/train.py --data ...
-```
-
-**Example output**
-
-```
-GPU: NVIDIA GeForce RTX 3090  •  $0.34/hr  •  Elapsed: 00:04:22
-
-MFU ████████░░░░░░░░░░░░░░░░░░░░░░  19.3%  •  6.9 / 35.6 TFLOPS  (target >45%)
-
-Time Breakdown
-  Forward/backward  ████████████████░░░░░░░░░░░░░░   61.0%
-  Data loader wait  ████████░░░░░░░░░░░░░░░░░░░░░░   28.0%  <- primary bottleneck
-  CUDA sync         ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░    7.0%
-  Optimizer step    █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    4.0%
-
-Hardware: Temp: 68°C  •  Power: 210W / 350W  •  VRAM: 8.0 GiB / 24.0 GiB
-
-Recommendation: Data loader is the primary bottleneck
-  [+17 ppt MFU expected]
-  Add num_workers=4, pin_memory=True to your DataLoader.
-```
+Each runtime runs in its own subprocess with a hard timeout; memory is the
+peak measured *inside* that process (device allocator or RSS). `metal-gemv`
+is an opt-in kernel microbenchmark on macOS, labelled synthetic and never
+recommended.
 
 ---
 
-## Usage: calibrate bench
+## calibrate plan
 
 ```
-calibrate bench --model <PATH> [OPTIONS]
-
-Options:
-  -m, --model <PATH>            Path to the model file (SafeTensors, ONNX, etc.)
-  -b, --batch-size <N>          Batch size for inference [default: 1]
-  -s, --seq-len <N>             Sequence length [default: 512]
-  -w, --warmup <N>              Warmup iterations [default: 10]
-  -r, --runs <N>                Measurement iterations [default: 100]
-  -O, --optimize-for <GOAL>     latency | throughput | memory  [default: latency]
-      --runtimes <LIST>         Comma-separated subset of runtimes to test
-  -o, --output <FORMAT>         terminal | json | markdown  [default: terminal]
-  -h, --help                    Print help
+calibrate plan --model <HF_ID|PATH> [--params-b 7.6] [--method full|lora|qlora]
+               [--optimizer none|unsloth|deep-speed] [--quantization none|8bit|4bit]
+               [--dataset-rows N] [--seq-len 2048] [--batch-size 1] [--epochs 1]
+               [--mfu 0.38] [--budget 100] [--availability now|flexible]
+               [--providers runpod,lambda,vastai] [--prices-file prices.json] [--output json]
 ```
 
-**Example output**
-
-```
-  Runtime       Batch    p50 (ms)    p99 (ms)   Throughput    Peak VRAM
-  -----------  ------  ----------  ----------  -----------  ----------
-> candle            1        8.1        12.4     123 tok/s     2.1 GiB
-  onnxruntime        1        9.8        14.1     102 tok/s     2.4 GiB
-  torchscript        1       11.3        17.0      88 tok/s     2.8 GiB
-
-Recommendation: candle is fastest for latency at this batch size.
-```
+* Parameter counts are exact when possible (Hub safetensors metadata, which is
+  public even for gated models; local safetensors headers); `HF_TOKEN` unlocks
+  the gated `config.json` for exact architecture figures.
+* VRAM is estimated **per GPU**: weights, gradients, optimizer state,
+  checkpointed activations, the logits/loss buffer and CUDA overhead.
+* Training time uses tokens = rows × `--seq-len`, hardware FLOPs including
+  recomputation (8N full, 6N LoRA per token, plus attention), the GPU's dense
+  BF16 peak, the instance's GPU count and your utilization (`--mfu`, ideally
+  from `calibrate watch`).
+* Lambda needs `LAMBDA_API_KEY`. Prices are cached for 15 minutes;
+  `--prices-file` supports on-prem or negotiated pricing and air-gapped use.
 
 ---
 
-## Usage: calibrate plan
+## Enterprise deployment
 
-```
-calibrate plan --model <ID> [OPTIONS]
-
-Options:
-  -m, --model <ID>              HuggingFace model ID or local path
-      --params-b <FLOAT>        Override parameter count (billions)
-      --method <METHOD>         full | lora | qlora  [default: lora]
-      --optimizer <LIB>         none | unsloth | deepspeed  [default: none]
-      --quantization <LEVEL>    none | 8bit | 4bit  [default: none]
-      --dataset-rows <N>        Number of training rows (for duration estimate)
-      --batch-size <N>          Effective batch size  [default: 4]
-      --epochs <N>              Number of training epochs  [default: 1]
-      --budget <USD>            Maximum total spend in dollars
-      --availability <WHEN>     flexible | now  [default: flexible]
-      --providers <LIST>        Comma-separated: runpod,lambda,vastai
-      --mfu <FLOAT>             Observed MFU from calibrate watch (overrides 0.30 default)
-  -o, --output <FORMAT>         terminal | json  [default: terminal]
-  -h, --help                    Print help
-```
-
-**Example output**
-
-```
-  Model:     meta-llama/Llama-3-8B  (8.00B parameters)
-  Required:  11.2 GiB VRAM
-             fits 16G, 24G, 40G, 48G, 80G  tiers
-
-  Component                    GiB
-  -------------------------  -------
-  Weights                       4.00
-  Gradients                     0.04  (adapter only)
-  Optimizer states              0.80
-  Activations                   0.21  (gradient checkpointing)
-  KV cache                      0.12
-  Efficiency reduction         -5.17  (library savings)
-  -------------------------  -------
-  Total                        10.66 GiB (+ 5% margin = 11.19 GiB)
-
-  Provider   GPU                    VRAM    $/hr    Duration     Est. Cost  Flags
-  ---------  ----------------------  -----  ------  -----------  ----------  -----
-> Vast.ai    RTX 3090                  24G    0.22   1.2–1.8 hr   $0.26–0.40  ~
-  RunPod     RTX 4090                  24G    0.44   1.0–1.5 hr   $0.44–0.66
-  Lambda     A10                       24G    0.75   1.1–1.7 hr   $0.83–1.28  !
-
-  ~ Price volatile — Vast.ai market price; may change before launch.
-  ! Unavailable    — listed but no capacity right now.
-
-  Recommendation: Vast.ai RTX 3090 (24 GiB VRAM) offers an estimated total cost
-    of $0.26–$0.40 for this workload.
-
-  Safe alternative (stable price): RunPod RTX 4090 at $0.44/hr
-    Estimated cost: $0.44–$0.66
-```
-
----
-
-## Integration: watch → plan
-
-`calibrate watch` records actual MFU for your training job. Pass that figure directly to `calibrate plan` to get more accurate duration and cost estimates:
-
-```bash
-# Step 1: observe your actual MFU
-calibrate watch --pid 12345
-# Output shows: MFU 38.2%
-
-# Step 2: use it to plan the full run
-calibrate plan --model meta-llama/Llama-3-8B \
-               --method lora --optimizer unsloth \
-               --dataset-rows 50000 --epochs 3 \
-               --mfu 0.38
-```
-
----
+* **Kubernetes:** a DaemonSet node agent (device metrics), a per-job sidecar
+  (hook metrics) and Prometheus Operator `PodMonitor`s — [deploy/kubernetes](deploy/kubernetes).
+* **Prometheus / OpenTelemetry:** identical metric names on both paths —
+  [docs/deployment.md](docs/deployment.md).
+* **Configuration:** `~/.config/calibrate/config.toml`, environment variables,
+  `--offline` for air-gapped clusters, proxy support — [docs/configuration.md](docs/configuration.md).
+* **Stable JSON:** `schema_version` on every snapshot and plan report —
+  [docs/json-schema.md](docs/json-schema.md).
+* **Reproducible analysis:** `--record-raw` + `--replay` turn field problems
+  into regression tests (`tests/fixtures/`).
 
 ## Requirements
 
-| Subcommand | Platform | GPU requirement |
+| | Linux | macOS |
 |---|---|---|
-| `watch` | Linux or macOS | NVIDIA GPU (Linux) · Apple Silicon or AMD GPU (macOS) |
-| `bench` | Linux or macOS | None (CPU-only runtimes work without a GPU) |
-| `plan`  | Linux or macOS | None (fetches live cloud pricing over the internet) |
-
-On macOS, `calibrate watch` uses IOKit to read GPU utilization and unified memory from Apple Silicon (and AMD/Intel) GPUs. GPU metrics are system-wide rather than per-process — the same data Activity Monitor shows in its GPU column.
-
-On Linux, the NVIDIA user-space library (`libcuda.so`, `libnvidia-ml.so`) must be present at runtime — it ships with the standard NVIDIA driver package. If `nvidia-smi` works, calibrate will work.
+| `watch` / `probe` | NVIDIA driver (NVML); optional DCGM | Apple Silicon or AMD/Intel GPU via IOKit (system-wide figures) |
+| `bench` | Python runtimes as needed | same |
+| `plan` | network or `--prices-file` | same |
 
 Windows is not supported.
 
----
+## Development
+
+```bash
+cargo test                          # unit + binary-level tests (offline)
+./scripts/test-all.sh               # strict release smoke test
+(cd python && python3 -m unittest discover -s tests)
+./scripts/gpu-validation.sh         # on an NVIDIA machine: validate estimators, record real traces
+```
 
 ## License
 

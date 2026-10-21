@@ -1,226 +1,293 @@
-use crate::metrics::window::MetricsWindow;
+//! Where training time goes.
+//!
+//! * **Instrumented** (Python hook present): exact shares of step wall time
+//!   spent waiting for data, in forward/backward, and in the optimizer.
+//! * **Heuristic** (no hook): each GPU sample is classified from coarse
+//!   signals — GPU busy, process-tree CPU, memory-controller load. Sampling is
+//!   much slower than a training step, so this shows *tendencies* (e.g. "the
+//!   GPU is idle while the CPU is busy"), not per-phase timings.
+//! * **Unavailable**: required signals are missing (no GPU data, or no CPU
+//!   data in device mode).
 
-/// How time is distributed across the five observable training-loop phases.
-///
-/// All fields sum to 100%.  Values are inferred from the correlation between
-/// GPU SM utilization and CPU utilization — see the architecture notes for
-/// the reasoning behind each threshold.
-#[derive(Debug, Clone, serde::Serialize)]
+use serde::Serialize;
+
+use crate::metrics::window::TickWindow;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BreakdownSource {
+    Instrumented,
+    Heuristic,
+    Unavailable,
+}
+
+/// Percentages summing to 100 (or all zero when unavailable).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TimeBreakdown {
-    /// Time the GPU was doing forward/backward pass math.
-    pub forward_backward_pct: f32,
-    /// Time the GPU was idle waiting for the data loader to deliver a batch.
-    pub data_loader_pct: f32,
-    /// Time lost to CUDA synchronization (`.item()` calls, scalar logging, etc.).
-    pub cuda_sync_pct: f32,
-    /// Time lost to memory allocation/deallocation inside the training loop.
-    pub memory_alloc_pct: f32,
-    /// Time in the optimizer step.
+    pub source: BreakdownSource,
+    /// Forward/backward (instrumented) or GPU busy > 60 % (heuristic).
+    pub compute_pct: f32,
+    /// Waiting for the next batch (instrumented) or GPU idle while the CPU
+    /// is busy (heuristic: likely input pipeline).
+    pub data_wait_pct: f32,
+    /// GPU idle while the CPU is also idle (heuristic only): host-device
+    /// synchronisation, logging, checkpointing, collective waits.
+    pub sync_stall_pct: f32,
+    /// Memory controller saturated while compute is low (heuristic only).
+    pub memory_bound_pct: f32,
+    /// Optimizer step (instrumented only).
     pub optimizer_pct: f32,
+    /// Everything else: partial GPU use (heuristic) or unaccounted step time.
+    pub other_pct: f32,
 }
 
-/// Classification of a single raw sample into a training-loop phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TimeSlot {
-    ForwardBackward,
-    DataLoader,
-    CudaSync,
-    MemoryAlloc,
-    Optimizer,
-}
-
-/// Classifies samples in the window and aggregates percentages.
-///
-/// The classification is *correlation-based*, not direct instrumentation.
-/// See [`classify_sample`] for the threshold logic.
-pub struct TimeBreakdownInferrer;
-
-impl TimeBreakdownInferrer {
-    pub fn infer(window: &MetricsWindow) -> TimeBreakdown {
-        if window.is_empty() {
-            return TimeBreakdown {
-                forward_backward_pct: 0.0,
-                data_loader_pct: 0.0,
-                cuda_sync_pct: 0.0,
-                memory_alloc_pct: 0.0,
-                optimizer_pct: 0.0,
-            };
-        }
-
-        let mut counts = [0usize; 5]; // indexed by TimeSlot discriminant
-        let total = window.len();
-
-        for sample in window.iter() {
-            let slot = classify_sample(
-                sample.sm_utilization.0,
-                sample.cpu_utilization.0,
-                sample.mem_utilization.0,
-            );
-            counts[slot as usize] += 1;
-        }
-
-        let pct = |n: usize| (n as f32 / total as f32) * 100.0;
-
-        TimeBreakdown {
-            forward_backward_pct: pct(counts[TimeSlot::ForwardBackward as usize]),
-            data_loader_pct: pct(counts[TimeSlot::DataLoader as usize]),
-            cuda_sync_pct: pct(counts[TimeSlot::CudaSync as usize]),
-            memory_alloc_pct: pct(counts[TimeSlot::MemoryAlloc as usize]),
-            optimizer_pct: pct(counts[TimeSlot::Optimizer as usize]),
+impl TimeBreakdown {
+    pub fn unavailable() -> Self {
+        Self {
+            source: BreakdownSource::Unavailable,
+            compute_pct: 0.0,
+            data_wait_pct: 0.0,
+            sync_stall_pct: 0.0,
+            memory_bound_pct: 0.0,
+            optimizer_pct: 0.0,
+            other_pct: 0.0,
         }
     }
 }
 
-/// Classify one sample into a time slot using observable proxy metrics.
-///
-/// Priority order matters — a sample can only be in one slot.
-///
-/// | SM util | CPU %  | Classification             |
-/// |---------|--------|----------------------------|
-/// | >60%    | any    | forward/backward           |
-/// | <15%    | >30%   | data loader waiting        |
-/// | <15%    | <10%   | CUDA sync overhead         |
-/// | any     | any, high mem churn | memory alloc |
-/// | 15-60%  | low    | optimizer step             |
-fn classify_sample(sm_util: f32, cpu_pct: f32, mem_util: f32) -> TimeSlot {
-    if sm_util > 60.0 {
-        return TimeSlot::ForwardBackward;
+pub fn infer(window: &TickWindow) -> TimeBreakdown {
+    instrumented(window).unwrap_or_else(|| heuristic(window))
+}
+
+fn instrumented(window: &TickWindow) -> Option<TimeBreakdown> {
+    let steps: Vec<_> = window.steps().collect();
+    if steps.len() < 3 || steps.iter().all(|s| s.data_s.is_none()) {
+        return None;
     }
-    // High memory controller utilization with mid-range SM → memory-bound op
-    // (common during gradient checkpointing or large embedding lookups).
-    if mem_util > 80.0 && sm_util < 60.0 {
-        return TimeSlot::MemoryAlloc;
+    let (mut total, mut data, mut compute, mut opt) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for s in &steps {
+        let d = s.data_s.unwrap_or(0.0).clamp(0.0, s.step_s);
+        total += s.step_s;
+        data += d;
+        match (s.compute_s, s.optimizer_s) {
+            (Some(c), o) => {
+                compute += c.max(0.0);
+                opt += o.unwrap_or(0.0).max(0.0);
+            }
+            (None, Some(o)) => opt += o.max(0.0),
+            (None, None) => compute += (s.step_s - d).max(0.0),
+        }
     }
-    if sm_util < 15.0 && cpu_pct > 30.0 {
-        return TimeSlot::DataLoader;
+    if total <= 0.0 {
+        return None;
     }
-    if sm_util < 15.0 && cpu_pct < 10.0 {
-        return TimeSlot::CudaSync;
+    let pct = |v: f64| ((v / total) * 100.0).clamp(0.0, 100.0) as f32;
+    let data_pct = pct(data);
+    let compute_pct = pct(compute);
+    let opt_pct = pct(opt);
+    let other = (100.0 - data_pct - compute_pct - opt_pct).max(0.0);
+    Some(normalize(TimeBreakdown {
+        source: BreakdownSource::Instrumented,
+        compute_pct,
+        data_wait_pct: data_pct,
+        sync_stall_pct: 0.0,
+        memory_bound_pct: 0.0,
+        optimizer_pct: opt_pct,
+        other_pct: other,
+    }))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Slot {
+    Compute,
+    DataWait,
+    SyncStall,
+    MemoryBound,
+    Other,
+}
+
+/// Classify one GPU observation. Thresholds are deliberately coarse.
+fn classify(busy: f32, cpu: f32, mem: Option<f32>) -> Slot {
+    if busy > 60.0 {
+        return Slot::Compute;
     }
-    // Residual: mid-range SM + low CPU → optimizer step
-    TimeSlot::Optimizer
+    if mem.is_some_and(|m| m > 80.0) {
+        return Slot::MemoryBound;
+    }
+    if busy < 15.0 && cpu > 30.0 {
+        return Slot::DataWait;
+    }
+    if busy < 15.0 && cpu < 10.0 {
+        return Slot::SyncStall;
+    }
+    Slot::Other
+}
+
+fn heuristic(window: &TickWindow) -> TimeBreakdown {
+    let mut counts = [0usize; 5];
+    let mut n = 0usize;
+    for t in window.iter() {
+        let Some(cpu) = t.cpu_pct else { continue };
+        for g in &t.gpus {
+            let Some(busy) = g.busy_pct() else { continue };
+            let mem = g.prof.and_then(|p| p.dram_active_pct).or(g.mem_util_pct);
+            counts[classify(busy, cpu, mem) as usize] += 1;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return TimeBreakdown::unavailable();
+    }
+    let pct = |s: Slot| counts[s as usize] as f32 / n as f32 * 100.0;
+    TimeBreakdown {
+        source: BreakdownSource::Heuristic,
+        compute_pct: pct(Slot::Compute),
+        data_wait_pct: pct(Slot::DataWait),
+        sync_stall_pct: pct(Slot::SyncStall),
+        memory_bound_pct: pct(Slot::MemoryBound),
+        optimizer_pct: 0.0,
+        other_pct: pct(Slot::Other),
+    }
+}
+
+/// Rescale so the parts sum to exactly 100 (phase timings can overlap).
+fn normalize(mut b: TimeBreakdown) -> TimeBreakdown {
+    let sum = b.compute_pct
+        + b.data_wait_pct
+        + b.sync_stall_pct
+        + b.memory_bound_pct
+        + b.optimizer_pct
+        + b.other_pct;
+    if sum > 0.0 && (sum - 100.0).abs() > 0.01 {
+        let k = 100.0 / sum;
+        b.compute_pct *= k;
+        b.data_wait_pct *= k;
+        b.sync_stall_pct *= k;
+        b.memory_bound_pct *= k;
+        b.optimizer_pct *= k;
+        b.other_pct *= k;
+    }
+    b
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collectors::RawSample;
-    use crate::metrics::units::{Celsius, Mhz, Mib, Percent, Watts};
-    use crate::metrics::window::MetricsWindow;
+    use crate::collectors::testing::{gpu, tick};
+    use crate::collectors::StepEvent;
 
-    fn sample(sm: f32, cpu: f32, mem_util: f32) -> RawSample {
-        RawSample {
-            timestamp_ms: 0,
-            gpu_index: 0,
-            sm_utilization: Percent(sm),
-            sm_clock_mhz: Mhz(1800),
-            sm_clock_max_mhz: Mhz(2000),
-            vram_used_mib: Mib(8192),
-            vram_total_mib: Mib(24576),
-            mem_utilization: Percent(mem_util),
-            temperature: Celsius(65.0),
-            power_draw: Watts(200.0),
-            power_limit: Watts(350.0),
-            throttle_thermal: false,
-            throttle_power: false,
-            throttle_hw_slowdown: false,
-            cpu_utilization: Percent(cpu),
-        }
+    fn sum(b: &TimeBreakdown) -> f32 {
+        b.compute_pct
+            + b.data_wait_pct
+            + b.sync_stall_pct
+            + b.memory_bound_pct
+            + b.optimizer_pct
+            + b.other_pct
+    }
+
+    fn sample(busy: f32, cpu: f32, mem: f32) -> crate::collectors::Tick {
+        let mut g = gpu(0, busy);
+        g.mem_util_pct = Some(mem);
+        tick(0, vec![g], Some(cpu))
     }
 
     #[test]
-    fn mostly_data_loader() {
-        let mut w = MetricsWindow::new(150);
-        // 70% data loader, 30% forward pass
+    fn classification_table() {
+        assert_eq!(classify(75.0, 20.0, Some(50.0)), Slot::Compute);
+        assert_eq!(classify(5.0, 60.0, Some(10.0)), Slot::DataWait);
+        assert_eq!(classify(5.0, 5.0, Some(10.0)), Slot::SyncStall);
+        assert_eq!(classify(40.0, 20.0, Some(90.0)), Slot::MemoryBound);
+        assert_eq!(classify(35.0, 15.0, Some(30.0)), Slot::Other);
+        assert_eq!(classify(35.0, 15.0, None), Slot::Other);
+    }
+
+    #[test]
+    fn heuristic_mostly_data_loader() {
+        let mut w = TickWindow::new();
         for _ in 0..7 {
-            w.push(sample(5.0, 60.0, 20.0));
+            w.push(sample(5.0, 250.0, 20.0));
         }
         for _ in 0..3 {
-            w.push(sample(80.0, 20.0, 50.0));
+            w.push(sample(85.0, 120.0, 50.0));
         }
-        let bd = TimeBreakdownInferrer::infer(&w);
-        assert!(
-            bd.data_loader_pct > 60.0,
-            "expected >60% data loader, got {:.1}%",
-            bd.data_loader_pct
-        );
-        assert!(bd.forward_backward_pct > 20.0);
+        let b = infer(&w);
+        assert_eq!(b.source, BreakdownSource::Heuristic);
+        assert!((b.data_wait_pct - 70.0).abs() < 0.1);
+        assert!((b.compute_pct - 30.0).abs() < 0.1);
+        assert!((sum(&b) - 100.0).abs() < 0.01);
     }
 
     #[test]
-    fn classify_forward_backward() {
-        assert_eq!(classify_sample(75.0, 20.0, 50.0), TimeSlot::ForwardBackward);
-    }
-
-    #[test]
-    fn classify_cuda_sync() {
-        assert_eq!(classify_sample(5.0, 5.0, 10.0), TimeSlot::CudaSync);
-    }
-
-    #[test]
-    fn classify_optimizer_step() {
-        // Mid-range SM with low CPU and normal mem → optimizer.
-        assert_eq!(classify_sample(35.0, 15.0, 30.0), TimeSlot::Optimizer);
-    }
-
-    #[test]
-    fn classify_memory_alloc() {
-        // High mem controller utilization with lower SM → memory alloc.
-        assert_eq!(classify_sample(40.0, 20.0, 90.0), TimeSlot::MemoryAlloc);
-    }
-
-    #[test]
-    fn all_forward_backward_gives_100pct() {
-        let mut w = MetricsWindow::new(150);
-        for _ in 0..20 {
-            w.push(sample(80.0, 20.0, 50.0)); // all ForwardBackward
+    fn no_cpu_data_means_unavailable_not_cuda_sync() {
+        // Regression: macOS used to report CPU = 0 and therefore "100 % CUDA sync".
+        let mut w = TickWindow::new();
+        for _ in 0..10 {
+            w.push(tick(0, vec![gpu(0, 2.0)], None));
         }
-        let bd = TimeBreakdownInferrer::infer(&w);
-        assert!(
-            (bd.forward_backward_pct - 100.0).abs() < 0.1,
-            "expected 100% forward/backward, got {:.1}%",
-            bd.forward_backward_pct
-        );
-        assert_eq!(bd.data_loader_pct, 0.0);
-        assert_eq!(bd.cuda_sync_pct, 0.0);
+        assert_eq!(infer(&w).source, BreakdownSource::Unavailable);
     }
 
     #[test]
-    fn breakdown_percentages_sum_to_100() {
-        let mut w = MetricsWindow::new(150);
-        // Mixed workload touching every slot.
-        for _ in 0..4 {
-            w.push(sample(80.0, 20.0, 50.0));
-        } // ForwardBackward
-        for _ in 0..3 {
-            w.push(sample(5.0, 70.0, 20.0));
-        } // DataLoader
-        for _ in 0..2 {
-            w.push(sample(5.0, 5.0, 10.0));
-        } // CudaSync
-        for _ in 0..1 {
-            w.push(sample(40.0, 10.0, 85.0));
-        } // MemoryAlloc
-        let bd = TimeBreakdownInferrer::infer(&w);
-        let sum = bd.forward_backward_pct
-            + bd.data_loader_pct
-            + bd.cuda_sync_pct
-            + bd.memory_alloc_pct
-            + bd.optimizer_pct;
-        assert!(
-            (sum - 100.0).abs() < 0.01,
-            "percentages should sum to 100, got {sum:.2}"
-        );
+    fn no_gpu_data_is_unavailable() {
+        let mut w = TickWindow::new();
+        w.push(tick(0, vec![], Some(100.0)));
+        assert_eq!(infer(&w).source, BreakdownSource::Unavailable);
+    }
+
+    fn step(i: u64, total: f64, data: f64, compute: Option<f64>, opt: Option<f64>) -> StepEvent {
+        StepEvent {
+            pid: 1,
+            rank: None,
+            step: i,
+            t_end_ms: i,
+            step_s: total,
+            data_s: Some(data),
+            compute_s: compute,
+            optimizer_s: opt,
+            tokens: None,
+            samples: None,
+            flops: None,
+        }
     }
 
     #[test]
-    fn empty_window_returns_all_zeros() {
-        let w = MetricsWindow::new(150);
-        let bd = TimeBreakdownInferrer::infer(&w);
-        assert_eq!(bd.forward_backward_pct, 0.0);
-        assert_eq!(bd.data_loader_pct, 0.0);
-        assert_eq!(bd.cuda_sync_pct, 0.0);
-        assert_eq!(bd.memory_alloc_pct, 0.0);
-        assert_eq!(bd.optimizer_pct, 0.0);
+    fn instrumented_uses_real_step_timings() {
+        let mut w = TickWindow::new();
+        let mut t = tick(0, vec![gpu(0, 99.0)], Some(100.0));
+        for i in 0..4 {
+            t.steps.push(step(i, 1.0, 0.25, Some(0.6), Some(0.1)));
+        }
+        w.push(t);
+        let b = infer(&w);
+        assert_eq!(b.source, BreakdownSource::Instrumented);
+        assert!((b.data_wait_pct - 25.0).abs() < 0.01);
+        assert!((b.compute_pct - 60.0).abs() < 0.01);
+        assert!((b.optimizer_pct - 10.0).abs() < 0.01);
+        assert!((b.other_pct - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn instrumented_without_phase_split_attributes_rest_to_compute() {
+        let mut w = TickWindow::new();
+        let mut t = tick(0, vec![], None);
+        for i in 0..3 {
+            t.steps.push(step(i, 2.0, 0.5, None, None));
+        }
+        w.push(t);
+        let b = infer(&w);
+        assert_eq!(b.source, BreakdownSource::Instrumented);
+        assert!((b.compute_pct - 75.0).abs() < 0.01);
+        assert!((sum(&b) - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn overlapping_phase_timings_are_normalised() {
+        let mut w = TickWindow::new();
+        let mut t = tick(0, vec![], None);
+        for i in 0..3 {
+            t.steps.push(step(i, 1.0, 0.3, Some(0.9), Some(0.2)));
+        }
+        w.push(t);
+        assert!((sum(&infer(&w)) - 100.0).abs() < 0.01);
     }
 }

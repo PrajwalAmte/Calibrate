@@ -1,79 +1,93 @@
-/// Tera floating-point operations per second.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
-pub struct Tflops(pub f64);
+//! Formatting helpers for optional hardware readings.
 
-/// Temperature in degrees Celsius.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
-pub struct Celsius(pub f32);
-
-/// Power in Watts.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
-pub struct Watts(pub f32);
-
-/// Memory size in Mebibytes.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
-pub struct Mib(pub u64);
-
-/// Clock frequency in MHz.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
-pub struct Mhz(pub u32);
-
-/// A percentage value in the range 0.0 – 100.0.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
-pub struct Percent(pub f32);
-
-impl Percent {
-    /// Clamp the inner value to [0, 100].
-    pub fn clamped(v: f32) -> Self {
-        Self(v.clamp(0.0, 100.0))
-    }
-
-    #[allow(dead_code)]
-    pub fn as_f32(self) -> f32 {
-        self.0
+/// "8.0 GiB", "512 MiB".
+pub fn fmt_mib(mib: u64) -> String {
+    if mib >= 1024 {
+        format!("{:.1} GiB", mib as f64 / 1024.0)
+    } else {
+        format!("{mib} MiB")
     }
 }
 
-impl std::fmt::Display for Tflops {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:.1} TFLOPS", self.0)
+pub fn fmt_opt<T>(v: Option<T>, f: impl FnOnce(T) -> String) -> String {
+    v.map(f).unwrap_or_else(|| "N/A".to_string())
+}
+
+pub fn fmt_pct(v: Option<f32>) -> String {
+    fmt_opt(v, |p| format!("{p:.1}%"))
+}
+
+pub fn fmt_temp(v: Option<f32>) -> String {
+    fmt_opt(v, |t| format!("{t:.0}°C"))
+}
+
+pub fn fmt_watts(v: Option<f32>) -> String {
+    fmt_opt(v, |w| format!("{w:.0}W"))
+}
+
+/// "00:04:22"
+pub fn fmt_hms(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
+/// Human duration for estimates: "45s", "12m", "3.4h", "2.1d".
+pub fn fmt_duration(secs: f64) -> String {
+    if !secs.is_finite() || secs < 0.0 {
+        return "n/a".into();
+    }
+    if secs < 90.0 {
+        format!("{secs:.0}s")
+    } else if secs < 90.0 * 60.0 {
+        format!("{:.0}m", secs / 60.0)
+    } else if secs < 48.0 * 3600.0 {
+        format!("{:.1}h", secs / 3600.0)
+    } else {
+        format!("{:.1}d", secs / 86400.0)
     }
 }
 
-impl std::fmt::Display for Celsius {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:.0}°C", self.0)
+/// "$0.42", "$1,234", "<$0.01".
+pub fn fmt_usd(v: f64) -> String {
+    if !v.is_finite() {
+        return "n/a".into();
     }
-}
-
-impl std::fmt::Display for Watts {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:.0}W", self.0)
+    if v > 0.0 && v < 0.01 {
+        return "<$0.01".into();
     }
-}
-
-impl std::fmt::Display for Mib {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.0 >= 1024 {
-            write!(f, "{:.1} GiB", self.0 as f64 / 1024.0)
-        } else {
-            write!(f, "{} MiB", self.0)
+    if v >= 1000.0 {
+        let whole = v.round() as u64;
+        let s = whole.to_string();
+        let mut out = String::new();
+        for (i, c) in s.chars().enumerate() {
+            if i > 0 && (s.len() - i).is_multiple_of(3) {
+                out.push(',');
+            }
+            out.push(c);
         }
+        return format!("${out}");
     }
+    format!("${v:.2}")
 }
 
-impl std::fmt::Display for Mhz {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} MHz", self.0)
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl std::fmt::Display for Percent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:.1}%", self.0)
+    #[test]
+    fn formats() {
+        assert_eq!(fmt_mib(8192), "8.0 GiB");
+        assert_eq!(fmt_mib(300), "300 MiB");
+        assert_eq!(fmt_temp(None), "N/A");
+        assert_eq!(fmt_watts(Some(210.4)), "210W");
+        assert_eq!(fmt_hms(262.0), "00:04:22");
+        assert_eq!(fmt_duration(30.0), "30s");
+        assert_eq!(fmt_duration(1800.0), "30m");
+        assert_eq!(fmt_duration(3.0 * 3600.0), "3.0h");
+        assert_eq!(fmt_duration(3.0 * 86400.0), "3.0d");
+        assert_eq!(fmt_usd(0.004), "<$0.01");
+        assert_eq!(fmt_usd(0.0), "$0.00");
+        assert_eq!(fmt_usd(12.345), "$12.35");
+        assert_eq!(fmt_usd(1234567.0), "$1,234,567");
     }
 }

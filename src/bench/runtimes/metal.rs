@@ -38,8 +38,10 @@ kernel void bench_matmul(
 
 // MetalRuntime
 
-/// Inference runtime that dispatches a GEMV (matrix × vector) operation via
-/// Apple's Metal GPU compute API.
+/// **Synthetic** Metal microbenchmark: one GEMV (matrix × vector) over the
+/// first weight tensor of a SafeTensors file. It measures Metal dispatch and
+/// memory-bandwidth behaviour for the weight shape — it does *not* run the
+/// model, so its results are labelled synthetic and never recommended.
 ///
 /// Mirrors `CandleRuntime` in purpose but exercises the Apple GPU rather than
 /// the CPU.  Uses the weight data from a SafeTensors checkpoint as the matrix
@@ -82,10 +84,12 @@ impl MetalRuntime {
 
     pub fn descriptor() -> RuntimeDescriptor {
         RuntimeDescriptor {
-            name: "metal",
+            name: "metal-gemv",
             is_available: || Device::system_default().is_some(),
-            is_compatible: |fmt| matches!(fmt, ModelFormat::SafeTensors),
+            is_compatible: |fmt| matches!(fmt, ModelFormat::SafeTensors | ModelFormat::HfDirectory),
             create: || Box::new(MetalRuntime::new()),
+            // A kernel microbenchmark, not model inference: run only on request.
+            opt_in: true,
         }
     }
 
@@ -140,11 +144,28 @@ impl MetalRuntime {
 
 impl Runtime for MetalRuntime {
     fn name(&self) -> &str {
-        "metal"
+        "metal-gemv"
+    }
+
+    fn synthetic(&self) -> bool {
+        true
     }
 
     fn load(&mut self, model_path: &Path) -> Result<Duration> {
         let start = Instant::now();
+
+        // A model directory: use its first .safetensors shard.
+        let shard;
+        let model_path = if model_path.is_dir() {
+            shard = std::fs::read_dir(model_path)?
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.extension().is_some_and(|x| x == "safetensors"))
+                .with_context(|| format!("no .safetensors file in {}", model_path.display()))?;
+            shard.as_path()
+        } else {
+            model_path
+        };
 
         // Validate SafeTensors header
         let bytes = std::fs::read(model_path)

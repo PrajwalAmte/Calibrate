@@ -1,30 +1,31 @@
-pub mod candle;
 pub mod llamacpp;
 #[cfg(target_os = "macos")]
 pub mod metal;
 pub mod onnxruntime;
+pub mod subprocess;
 pub mod tensorrt;
 pub mod torchscript;
+pub mod transformers;
 
 use crate::bench::runtime::RuntimeDescriptor;
 
-/// Return the full set of registered runtime descriptors.
-///
-/// The harness calls `is_available()` and `is_compatible()` on each descriptor
-/// at startup to build the list of runtimes that will actually run. The order
-/// here determines the display order in the output table.
+/// All registered runtimes, in display order. Availability and format
+/// compatibility are checked by the harness before anything is created.
 pub fn registry() -> Vec<RuntimeDescriptor> {
     #[allow(unused_mut)]
     let mut runtimes = vec![
-        candle::CandleRuntime::descriptor(),
-        onnxruntime::OnnxRuntime::descriptor(),
+        transformers::descriptor(),
+        torchscript::descriptor(),
+        onnxruntime::descriptor(),
+        tensorrt::descriptor(),
         llamacpp::LlamaCppRuntime::descriptor(),
-        torchscript::TorchScriptRuntime::descriptor(),
-        tensorrt::TensorRtRuntime::descriptor(),
     ];
-
     #[cfg(target_os = "macos")]
-    runtimes.insert(1, metal::MetalRuntime::descriptor());
-
+    runtimes.push(metal::MetalRuntime::descriptor());
     runtimes
+}
+
+/// Names of every runtime, for error messages.
+pub fn names() -> Vec<&'static str> {
+    registry().iter().map(|d| d.name).collect()
 }

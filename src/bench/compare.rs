@@ -139,6 +139,8 @@ mod tests {
             warmup_stable_at: 5,
             flagged_unreliable: false,
             oom: false,
+            synthetic: false,
+            memory_source: "device".into(),
         }
     }
 
@@ -198,8 +200,8 @@ mod tests {
     #[test]
     fn print_comparison_does_not_panic_on_new_and_removed_entries() {
         let base = make_report(vec![make_result("onnx", 20.0)]);
-        let cur = make_report(vec![make_result("candle", 15.0)]);
-        // "onnx" is removed in current, "candle" is new — both code paths exercised.
+        let cur = make_report(vec![make_result("transformers", 15.0)]);
+        // "onnx" is removed in current, "transformers" is new — both code paths exercised.
         print_comparison(&base, &cur);
     }
 }

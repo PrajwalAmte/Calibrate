@@ -1,10 +1,12 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use chrono::Utc;
 use tracing::info;
 
 use crate::bench::harness::{run_runtime_benchmarks, HarnessConfig};
 use crate::bench::input::{BenchInput, ModelFormat};
-use crate::bench::runtime::build_runtime_list;
+use crate::bench::runtime::{build_runtime_list, SubprocessSettings};
 use crate::bench::{BenchReport, Recommendation};
 use crate::cli::{BenchArgs, BenchOutputFormat, OptimizeFor};
 
@@ -23,6 +25,14 @@ pub async fn run(args: BenchArgs) -> Result<()> {
 
     // Build the list of runtimes to run.
     let requested = args.runtimes.as_deref();
+    if let Some(names) = requested {
+        let known = crate::bench::runtimes::names();
+        for n in names {
+            if !known.iter().any(|k| k.eq_ignore_ascii_case(n)) {
+                anyhow::bail!("unknown runtime '{n}' (available: {})", known.join(", "));
+            }
+        }
+    }
     let (mut runtimes, mut all_skipped) = build_runtime_list(requested, model_format);
 
     if runtimes.is_empty() {
@@ -30,7 +40,10 @@ pub async fn run(args: BenchArgs) -> Result<()> {
             "No benchmarkable runtimes found for the {} format.",
             model_format.as_str()
         );
-        eprintln!("Install onnxruntime, llama.cpp, or PyTorch and try again.");
+        eprintln!(
+            "Install a runtime for this format (transformers/PyTorch for HF directories, \
+             onnxruntime for .onnx, llama.cpp for .gguf) and try again."
+        );
         if !all_skipped.is_empty() {
             eprintln!("\nSkipped:");
             for s in &all_skipped {
@@ -43,8 +56,20 @@ pub async fn run(args: BenchArgs) -> Result<()> {
     let config = HarnessConfig {
         warmup: args.warmup,
         iterations: args.iterations,
+        throughput_window: Duration::from_secs_f64(args.throughput_window),
         gpu_device_index,
-        ..HarnessConfig::default()
+        max_total_duration: Duration::from_secs_f64(args.timeout),
+        subprocess: SubprocessSettings {
+            warmup: args.warmup,
+            iterations: args.iterations,
+            throughput_window: Duration::from_secs_f64(args.throughput_window),
+            timeout: Duration::from_secs_f64(args.timeout),
+            seq_len: args.seq_len as usize,
+            input_shape: args
+                .input_shape
+                .as_ref()
+                .map(|v| v.iter().map(|&d| d as usize).collect()),
+        },
     };
 
     // Pre-generate one fixed input per batch size.
@@ -130,8 +155,11 @@ pub(crate) fn build_recommendation(
     results: &[crate::bench::BenchResult],
     optimize_for: OptimizeFor,
 ) -> Option<Recommendation> {
-    // Only consider results that completed without OOM.
-    let valid: Vec<_> = results.iter().filter(|r| !r.oom).collect();
+    // Only real (non-synthetic) results that completed without OOM.
+    let valid: Vec<_> = results
+        .iter()
+        .filter(|r| !r.oom && !r.synthetic && r.stats.sample_count > 0)
+        .collect();
     if valid.is_empty() {
         return None;
     }
@@ -139,16 +167,14 @@ pub(crate) fn build_recommendation(
     let best = match optimize_for {
         OptimizeFor::Latency => valid
             .iter()
-            .min_by(|a, b| a.stats.p99_ms.partial_cmp(&b.stats.p99_ms).unwrap()),
-        OptimizeFor::Throughput => valid.iter().max_by(|a, b| {
-            a.stats
-                .throughput_rps
-                .partial_cmp(&b.stats.throughput_rps)
-                .unwrap()
-        }),
+            .min_by(|a, b| a.stats.p99_ms.total_cmp(&b.stats.p99_ms)),
+        OptimizeFor::Throughput => valid
+            .iter()
+            .max_by(|a, b| a.stats.throughput_rps.total_cmp(&b.stats.throughput_rps)),
         OptimizeFor::Memory => valid
             .iter()
-            .min_by(|a, b| a.peak_memory_mib.partial_cmp(&b.peak_memory_mib).unwrap()),
+            .filter(|r| r.peak_memory_mib > 0.0)
+            .min_by(|a, b| a.peak_memory_mib.total_cmp(&b.peak_memory_mib)),
     }?;
 
     let rationale = match optimize_for {
@@ -206,6 +232,8 @@ mod tests {
             warmup_stable_at: 5,
             flagged_unreliable: false,
             oom,
+            synthetic: false,
+            memory_source: "device".into(),
         }
     }
 
@@ -213,11 +241,11 @@ mod tests {
     fn recommendation_latency_picks_lowest_p99() {
         let results = vec![
             make_result("onnx", 1, 25.0, 40.0, 512.0, false),
-            make_result("candle", 1, 10.0, 90.0, 380.0, false), // lowest p99
+            make_result("transformers", 1, 10.0, 90.0, 380.0, false), // lowest p99
             make_result("llama", 1, 50.0, 20.0, 800.0, false),
         ];
         let rec = build_recommendation(&results, OptimizeFor::Latency).unwrap();
-        assert_eq!(rec.runtime, "candle");
+        assert_eq!(rec.runtime, "transformers");
         assert_eq!(rec.batch_size, 1);
     }
 
@@ -225,29 +253,29 @@ mod tests {
     fn recommendation_throughput_picks_highest_rps() {
         let results = vec![
             make_result("onnx", 1, 20.0, 60.0, 512.0, false),
-            make_result("candle", 1, 15.0, 120.0, 380.0, false), // highest tput
+            make_result("transformers", 1, 15.0, 120.0, 380.0, false), // highest tput
             make_result("llama", 1, 30.0, 30.0, 800.0, false),
         ];
         let rec = build_recommendation(&results, OptimizeFor::Throughput).unwrap();
-        assert_eq!(rec.runtime, "candle");
+        assert_eq!(rec.runtime, "transformers");
     }
 
     #[test]
     fn recommendation_memory_picks_lowest_memory() {
         let results = vec![
             make_result("onnx", 1, 20.0, 60.0, 512.0, false),
-            make_result("candle", 1, 15.0, 90.0, 200.0, false), // lowest memory
+            make_result("transformers", 1, 15.0, 90.0, 200.0, false), // lowest memory
             make_result("llama", 1, 30.0, 30.0, 900.0, false),
         ];
         let rec = build_recommendation(&results, OptimizeFor::Memory).unwrap();
-        assert_eq!(rec.runtime, "candle");
+        assert_eq!(rec.runtime, "transformers");
     }
 
     #[test]
     fn recommendation_excludes_oom_results() {
         let results = vec![
             make_result("onnx", 1, 20.0, 60.0, 512.0, false),
-            make_result("candle", 1, 5.0, 999.0, 100.0, true), // oom — must be ignored
+            make_result("transformers", 1, 5.0, 999.0, 100.0, true), // oom — must be ignored
         ];
         let rec = build_recommendation(&results, OptimizeFor::Latency).unwrap();
         assert_eq!(rec.runtime, "onnx", "OOM result should not win");
@@ -257,7 +285,7 @@ mod tests {
     fn recommendation_all_oom_returns_none() {
         let results = vec![
             make_result("onnx", 1, 0.0, 0.0, 0.0, true),
-            make_result("candle", 1, 0.0, 0.0, 0.0, true),
+            make_result("transformers", 1, 0.0, 0.0, 0.0, true),
         ];
         assert!(build_recommendation(&results, OptimizeFor::Latency).is_none());
     }

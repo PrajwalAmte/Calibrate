@@ -1,84 +1,53 @@
-/// Baked-in GPU spec table, compiled into the binary via `include_str!`.
-///
-/// This is the last-resort fallback when the network is unavailable and the
-/// local cache is missing or corrupt.  It covers the 30 most common GPUs
-/// seen in ML training workloads.
-pub struct FallbackRepository;
+//! Built-in GPU spec table, compiled into the binary.
 
-/// JSON is embedded at compile time — zero runtime I/O, zero allocation until
-/// the first lookup.
+use crate::gpu_specs::GpuSpec;
+
 pub(crate) static FALLBACK_DATA: &str = include_str!("../../assets/fallback_specs.json");
 
-impl crate::gpu_specs::SpecsRepository for FallbackRepository {
-    fn get_by_name(&self, name: &str) -> Option<crate::gpu_specs::GpuSpec> {
-        // Parse once per lookup.  Because the binary is small (< 4 KB of JSON)
-        // and lookups happen only at startup, the cost is negligible.
-        let specs: Vec<crate::gpu_specs::GpuSpec> = serde_json::from_str(FALLBACK_DATA).ok()?;
-        crate::gpu_specs::find_best_match(&specs, name).cloned()
-    }
+/// Parse the embedded table. The JSON is validated by tests, so a parse
+/// failure here is a build defect.
+pub fn builtin_specs() -> Vec<GpuSpec> {
+    serde_json::from_str(FALLBACK_DATA).expect("assets/fallback_specs.json is valid")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu_specs::SpecsRepository;
+    use std::collections::HashSet;
 
     #[test]
-    fn json_parses_without_error() {
-        let specs: Vec<crate::gpu_specs::GpuSpec> =
-            serde_json::from_str(FALLBACK_DATA).expect("fallback_specs.json must be valid JSON");
-        assert!(
-            specs.len() >= 40,
-            "expected at least 40 GPU specs, got {}",
-            specs.len()
-        );
-    }
-
-    #[test]
-    fn all_specs_have_positive_tflops() {
-        let specs: Vec<crate::gpu_specs::GpuSpec> = serde_json::from_str(FALLBACK_DATA).unwrap();
-        for spec in &specs {
+    fn every_entry_is_valid_and_unique() {
+        let specs = builtin_specs();
+        assert!(specs.len() >= 50, "got {}", specs.len());
+        let mut names = HashSet::new();
+        for s in &specs {
+            assert!(s.is_valid(), "invalid entry {s:?}");
+            assert!(names.insert(s.name.to_lowercase()), "duplicate {}", s.name);
             assert!(
-                spec.bf16_tflops > 0.0,
-                "spec '{}' has non-positive bf16_tflops",
-                spec.name
+                s.bf16_tflops >= s.fp32_tflops * 0.99 || s.name.starts_with("GTX"),
+                "{}: tensor rate below FP32 rate looks like a data error",
+                s.name
             );
         }
     }
 
     #[test]
-    fn resolves_rtx_3090_exact_name() {
-        let spec = FallbackRepository.get_by_name("RTX 3090").unwrap();
-        assert!((spec.bf16_tflops - 35.6).abs() < 0.1);
-        assert_eq!(spec.vram_gib, 24);
-    }
-
-    #[test]
-    fn network_unavailable_falls_back_cleanly() {
-        // Simulate what crate::gpu_specs::resolve does when the network is
-        // down: HttpSpecsClient.get_by_name returns None, so FallbackRepository
-        // is the only source.  Verify it resolves known names independently.
-        let result = FallbackRepository.get_by_name("NVIDIA GeForce RTX 4090");
+    fn geforce_ampere_uses_tensor_rate() {
+        let specs = builtin_specs();
+        let r3090 = specs.iter().find(|s| s.name == "RTX 3090").unwrap();
         assert!(
-            result.is_some(),
-            "should resolve RTX 4090 from baked-in table"
+            (r3090.bf16_tflops - 71.2).abs() < 0.5,
+            "RTX 3090 dense BF16 (FP32 acc) is ~71 TFLOPS, got {}",
+            r3090.bf16_tflops
         );
     }
 
     #[test]
-    fn v100_sxm2_matches_hyphenated_nvml_name() {
-        let spec = FallbackRepository
-            .get_by_name("NVIDIA Tesla V100-SXM2-32GB")
-            .unwrap();
-        assert!(
-            spec.name.contains("V100"),
-            "expected V100, got {}",
-            spec.name
-        );
-        assert!(
-            spec.name.contains("SXM"),
-            "expected SXM variant, got {}",
-            spec.name
-        );
+    fn datacenter_reference_values() {
+        let specs = builtin_specs();
+        let get = |n: &str| specs.iter().find(|s| s.name == n).unwrap().bf16_tflops;
+        assert_eq!(get("A100 SXM"), 312.0);
+        assert_eq!(get("H100 SXM"), 989.0);
+        assert_eq!(get("L40S"), 362.0);
     }
 }

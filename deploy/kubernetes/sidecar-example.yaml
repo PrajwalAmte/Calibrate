@@ -1,0 +1,61 @@
+# Per-job sidecar: measured MFU and step breakdown for one training pod.
+#
+# * shareProcessNamespace lets the sidecar see the trainer's process tree
+#   (ranks, DataLoader workers) for CPU accounting.
+# * The trainer imports calibrate_hook; both containers mount the same
+#   emptyDir at /var/run/calibrate and run as the same UID, because the hook
+#   socket is owner-only (0600).
+# * GPU device metrics come from the node DaemonSet; the sidecar contributes
+#   job-level, instrumented metrics. NVML process IDs are host PIDs, which a
+#   pod cannot map, so the sidecar does not request a GPU itself.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: finetune-llama
+spec:
+  template:
+    metadata:
+      labels:
+        calibrate.io/scrape: "true"
+    spec:
+      restartPolicy: Never
+      shareProcessNamespace: true
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      volumes:
+        - name: calibrate-hook
+          emptyDir: { medium: Memory, sizeLimit: 1Mi }
+      containers:
+        - name: trainer
+          image: your-registry/trainer:latest
+          command: ["torchrun", "--nproc-per-node=8", "train.py"]
+          env:
+            - { name: CALIBRATE_HOOK_DIR, value: /var/run/calibrate }
+          volumeMounts:
+            - { name: calibrate-hook, mountPath: /var/run/calibrate }
+          resources:
+            limits: { nvidia.com/gpu: 8 }
+        - name: calibrate
+          image: ghcr.io/prajwalamte/calibrate:0.2.0
+          args:
+            - watch
+            - --process-name=torchrun
+            - --output=none
+            - --prometheus-listen=0.0.0.0:9401
+            - --offline
+            - --log-format=json
+          env:
+            - { name: CALIBRATE_HOOK_DIR, value: /var/run/calibrate }
+          ports:
+            - { name: calibrate, containerPort: 9401 }
+          volumeMounts:
+            - { name: calibrate-hook, mountPath: /var/run/calibrate }
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }

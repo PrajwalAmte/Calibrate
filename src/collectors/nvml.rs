@@ -1,200 +1,250 @@
-use std::sync::{atomic::AtomicBool, Arc};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+//! NVIDIA backend: NVML device queries plus optional GPM / DCGM profiling.
 
-use tracing::{debug, error, info, warn};
+use std::collections::BTreeSet;
+use std::time::Duration;
 
-use crate::collectors::{MetricsCollector, RawSample};
+use nvml_wrapper::bitmasks::device::ThrottleReasons;
+use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
+use nvml_wrapper::Nvml;
+use tracing::{debug, info, warn};
+
+use crate::cli::MetricsSource;
+use crate::collectors::dcgm::DcgmReader;
+use crate::collectors::gpm::Gpm;
+use crate::collectors::{GpuSample, Throttle};
 use crate::error::CalibrateError;
-use crate::metrics::units::{Celsius, Mhz, Mib, Percent, Watts};
 
-/// Collects GPU metrics via NVML on a dedicated OS thread.
-///
-/// NVML is synchronous and must not be called from a tokio task.
-/// GPU discovery is performed on every tick so multi-GPU jobs that acquire
-/// devices after startup are automatically tracked.
-pub struct NvmlCollector {
-    /// PID of the training process being monitored.
-    pid: u32,
-    interval: Duration,
-    shared_cpu: Arc<parking_lot::Mutex<Percent>>,
+/// Initialise NVML with an actionable error.
+pub fn init() -> Result<Nvml, CalibrateError> {
+    Nvml::init().map_err(|e| CalibrateError::NvmlInit(e.to_string()))
 }
 
-impl NvmlCollector {
-    pub fn new(pid: u32, interval: Duration, shared_cpu: Arc<parking_lot::Mutex<Percent>>) -> Self {
-        Self {
-            pid,
-            interval,
-            shared_cpu,
+/// Which profiling source is in effect (reported in snapshots).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveSource {
+    Gpm,
+    Dcgm,
+    /// GPM where supported, kernel-busy elsewhere.
+    Mixed,
+    Nvml,
+}
+
+impl ActiveSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Gpm => "nvml-gpm",
+            Self::Dcgm => "dcgm",
+            Self::Mixed => "nvml-gpm+nvml",
+            Self::Nvml => "nvml",
         }
     }
-
-    /// Attempt to initialize NVML once; returns an error with a helpful
-    /// message if the driver is not present.
-    pub fn probe() -> Result<(), CalibrateError> {
-        nvml_wrapper::Nvml::init()
-            .map(|_| ())
-            .map_err(|e| CalibrateError::NvmlInit(e.to_string()))
-    }
 }
 
-impl MetricsCollector for NvmlCollector {
-    fn run(self, tx: flume::Sender<RawSample>, stop: Arc<AtomicBool>) {
-        let nvml = match nvml_wrapper::Nvml::init() {
-            Ok(n) => n,
-            Err(e) => {
-                error!("NVML init failed in collector thread: {e}");
-                return;
+pub struct NvmlBackend {
+    nvml: Nvml,
+    gpm: Option<Gpm>,
+    dcgm: Option<DcgmReader>,
+    source: ActiveSource,
+}
+
+impl NvmlBackend {
+    pub fn new(requested: MetricsSource, interval: Duration) -> Result<Self, CalibrateError> {
+        let nvml = init()?;
+        let count = nvml
+            .device_count()
+            .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
+
+        let gpm_support = |gpm: &Gpm| -> (usize, usize) {
+            let mut ok = 0;
+            for i in 0..count {
+                if let Ok(d) = nvml.device_by_index(i) {
+                    if gpm.is_supported(&d) {
+                        ok += 1;
+                    }
+                }
             }
+            (ok, count as usize)
         };
 
-        let mut consecutive_no_gpu: u32 = 0;
-        const NO_GPU_EXIT_THRESHOLD: u32 = 5;
-
-        loop {
-            if stop.load(std::sync::atomic::Ordering::Relaxed) {
-                break;
+        let (gpm, dcgm, source) = match requested {
+            MetricsSource::Nvml => (None, None, ActiveSource::Nvml),
+            MetricsSource::Gpm => {
+                let gpm = Gpm::load().ok_or_else(|| {
+                    CalibrateError::ProfilingUnavailable(
+                        "NVML GPM symbols not found — requires driver R520+ and a Hopper or newer GPU"
+                            .into(),
+                    )
+                })?;
+                let (ok, total) = gpm_support(&gpm);
+                if ok == 0 {
+                    return Err(CalibrateError::ProfilingUnavailable(
+                        "no GPU on this system supports NVML GPM (Hopper or newer required); \
+                         try --metrics-source dcgm"
+                            .into(),
+                    ));
+                }
+                let src = if ok == total {
+                    ActiveSource::Gpm
+                } else {
+                    ActiveSource::Mixed
+                };
+                (Some(gpm), None, src)
             }
+            MetricsSource::Dcgm => {
+                if !DcgmReader::available() {
+                    return Err(CalibrateError::ProfilingUnavailable(
+                        "`dcgmi` not found or the DCGM host engine is not running \
+                         (install datacenter-gpu-manager and start nv-hostengine)"
+                            .into(),
+                    ));
+                }
+                let r = DcgmReader::start(&[], interval)
+                    .map_err(|e| CalibrateError::ProfilingUnavailable(e.to_string()))?;
+                (None, Some(r), ActiveSource::Dcgm)
+            }
+            MetricsSource::Auto => {
+                let gpm = Gpm::load();
+                let (ok, total) = gpm.as_ref().map(gpm_support).unwrap_or((0, count as usize));
+                if total > 0 && ok == total {
+                    (gpm, None, ActiveSource::Gpm)
+                } else if DcgmReader::available() {
+                    match DcgmReader::start(&[], interval) {
+                        Ok(r) => (None, Some(r), ActiveSource::Dcgm),
+                        Err(e) => {
+                            warn!("dcgmi dmon failed to start: {e}");
+                            mixed_or_nvml(gpm, ok)
+                        }
+                    }
+                } else {
+                    mixed_or_nvml(gpm, ok)
+                }
+            }
+        };
+        info!(source = source.label(), "NVML backend ready");
+        Ok(Self {
+            nvml,
+            gpm,
+            dcgm,
+            source,
+        })
+    }
 
-            let timestamp_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
+    pub fn source(&self) -> ActiveSource {
+        self.source
+    }
 
-            let gpu_indices = match discover_gpu_indices(&nvml, self.pid) {
-                Ok(v) => v,
+    pub fn device_count(&self) -> u32 {
+        self.nvml.device_count().unwrap_or(0)
+    }
+
+    /// GPUs on which any of `pids` has a compute or graphics context.
+    pub fn devices_for_pids(&self, pids: &[u32]) -> Result<Vec<u32>, CalibrateError> {
+        let wanted: BTreeSet<u32> = pids.iter().copied().collect();
+        let mut out = Vec::new();
+        for i in 0..self.device_count() {
+            let device = self
+                .nvml
+                .device_by_index(i)
+                .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
+            let mut hit = false;
+            if let Ok(procs) = device.running_compute_processes() {
+                hit |= procs.iter().any(|p| wanted.contains(&p.pid));
+            }
+            if !hit {
+                if let Ok(procs) = device.running_graphics_processes() {
+                    hit |= procs.iter().any(|p| wanted.contains(&p.pid));
+                }
+            }
+            if hit {
+                out.push(i);
+            }
+        }
+        Ok(out)
+    }
+
+    /// PIDs NVML reports on any device (used to detect PID-namespace mismatch).
+    pub fn all_gpu_pids(&self) -> Vec<u32> {
+        let mut out = BTreeSet::new();
+        for i in 0..self.device_count() {
+            if let Ok(d) = self.nvml.device_by_index(i) {
+                for p in d.running_compute_processes().unwrap_or_default() {
+                    out.insert(p.pid);
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// Sample the given devices. Devices that fail entirely are skipped.
+    pub fn sample(&mut self, indices: &[u32]) -> Vec<GpuSample> {
+        let mut out = Vec::with_capacity(indices.len());
+        if let Some(d) = self.dcgm.as_mut() {
+            if !d.is_running() {
+                warn!("dcgmi dmon exited — falling back to NVML utilization");
+                self.dcgm = None;
+                self.source = ActiveSource::Nvml;
+            }
+        }
+        for &index in indices {
+            let device = match self.nvml.device_by_index(index) {
+                Ok(d) => d,
                 Err(e) => {
-                    warn!("GPU discovery failed: {e}");
-                    std::thread::sleep(self.interval);
+                    warn!("GPU {index}: {e}");
                     continue;
                 }
             };
-
-            if gpu_indices.is_empty() {
-                consecutive_no_gpu += 1;
-                if consecutive_no_gpu >= NO_GPU_EXIT_THRESHOLD {
-                    info!(
-                        pid = self.pid,
-                        "No GPU activity for {} consecutive ticks — process likely exited",
-                        consecutive_no_gpu
-                    );
-                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                    break;
-                }
-                std::thread::sleep(self.interval);
-                continue;
-            }
-            consecutive_no_gpu = 0;
-
-            let cpu_pct = *self.shared_cpu.lock();
-
-            for gpu_index in gpu_indices {
-                match sample_device(&nvml, gpu_index, timestamp_ms, cpu_pct) {
-                    Ok(sample) => {
-                        if tx.send(sample).is_err() {
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        warn!("GPU {gpu_index} sample failed: {e}");
-                    }
-                }
-            }
-
-            std::thread::sleep(self.interval);
-            debug!(
-                "NvmlCollector tick (pid={}, interval={:?})",
-                self.pid, self.interval
-            );
+            let prof = if let Some(g) = self.gpm.as_mut() {
+                g.sample(index, &device)
+            } else {
+                self.dcgm.as_ref().and_then(|d| d.get(index))
+            };
+            let util = device.utilization_rates().ok();
+            let mem = device.memory_info().ok();
+            let throttle = device
+                .current_throttle_reasons()
+                .map(|r| Throttle {
+                    hw_thermal: r.contains(ThrottleReasons::HW_THERMAL_SLOWDOWN),
+                    sw_thermal: r.contains(ThrottleReasons::SW_THERMAL_SLOWDOWN),
+                    power_cap: r.contains(ThrottleReasons::SW_POWER_CAP),
+                    hw_slowdown: r.contains(ThrottleReasons::HW_SLOWDOWN)
+                        || r.contains(ThrottleReasons::HW_POWER_BRAKE_SLOWDOWN),
+                })
+                .unwrap_or_default();
+            out.push(GpuSample {
+                index,
+                name: device.name().unwrap_or_else(|_| format!("GPU {index}")),
+                util_pct: util.as_ref().map(|u| (u.gpu as f32).clamp(0.0, 100.0)),
+                prof,
+                sm_clock_mhz: device.clock_info(Clock::SM).ok(),
+                sm_clock_max_mhz: device.max_clock_info(Clock::SM).ok(),
+                vram_used_mib: mem.as_ref().map(|m| m.used / (1024 * 1024)),
+                vram_total_mib: mem.as_ref().map(|m| m.total / (1024 * 1024)),
+                mem_util_pct: util.as_ref().map(|u| (u.memory as f32).clamp(0.0, 100.0)),
+                temperature_c: device
+                    .temperature(TemperatureSensor::Gpu)
+                    .ok()
+                    .map(|t| t as f32),
+                power_w: device.power_usage().ok().map(|mw| mw as f32 / 1000.0),
+                power_limit_w: device
+                    .enforced_power_limit()
+                    .or_else(|_| device.power_management_limit())
+                    .ok()
+                    .map(|mw| mw as f32 / 1000.0),
+                throttle,
+            });
         }
+        debug!(n = out.len(), "NVML sampled");
+        out
     }
 }
 
-/// Return the NVML device indices that have `pid` in their compute-processes list.
-fn discover_gpu_indices(nvml: &nvml_wrapper::Nvml, pid: u32) -> Result<Vec<u32>, CalibrateError> {
-    let device_count = nvml
-        .device_count()
-        .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-    let mut indices = Vec::new();
-    for i in 0..device_count {
-        let device = nvml
-            .device_by_index(i)
-            .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-        let processes = device
-            .running_compute_processes()
-            .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-        if processes.iter().any(|p| p.pid == pid) {
-            indices.push(i);
-        }
+fn mixed_or_nvml(
+    gpm: Option<Gpm>,
+    supported: usize,
+) -> (Option<Gpm>, Option<DcgmReader>, ActiveSource) {
+    if supported > 0 {
+        (gpm, None, ActiveSource::Mixed)
+    } else {
+        (None, None, ActiveSource::Nvml)
     }
-    Ok(indices)
-}
-
-/// Query a single NVML device and return a [`RawSample`].
-fn sample_device(
-    nvml: &nvml_wrapper::Nvml,
-    gpu_index: u32,
-    timestamp_ms: u64,
-    cpu_pct: Percent,
-) -> Result<RawSample, CalibrateError> {
-    use nvml_wrapper::enum_wrappers::device::Clock;
-
-    let device = nvml
-        .device_by_index(gpu_index)
-        .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-    let util = device
-        .utilization_rates()
-        .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-    let sm_clock = device
-        .clock_info(Clock::SM)
-        .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-    let sm_clock_max = device
-        .max_clock_info(Clock::SM)
-        .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-    let mem_info = device
-        .memory_info()
-        .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-    let temp = device
-        .temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu)
-        .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-    let power_mw = device
-        .power_usage()
-        .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-    let power_limit_mw = device
-        .power_management_limit()
-        .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-    let throttle_reasons = device
-        .current_throttle_reasons()
-        .map_err(|e| CalibrateError::NvmlQuery(e.to_string()))?;
-
-    use nvml_wrapper::bitmasks::device::ThrottleReasons;
-
-    Ok(RawSample {
-        timestamp_ms,
-        gpu_index,
-        sm_utilization: Percent::clamped(util.gpu as f32),
-        sm_clock_mhz: Mhz(sm_clock),
-        sm_clock_max_mhz: Mhz(sm_clock_max),
-        vram_used_mib: Mib(mem_info.used / (1024 * 1024)),
-        vram_total_mib: Mib(mem_info.total / (1024 * 1024)),
-        mem_utilization: Percent::clamped(util.memory as f32),
-        temperature: Celsius(temp as f32),
-        power_draw: Watts(power_mw as f32 / 1000.0),
-        power_limit: Watts(power_limit_mw as f32 / 1000.0),
-        throttle_thermal: throttle_reasons.contains(ThrottleReasons::HW_THERMAL_SLOWDOWN),
-        throttle_power: throttle_reasons.contains(ThrottleReasons::SW_POWER_CAP),
-        throttle_hw_slowdown: throttle_reasons.contains(ThrottleReasons::HW_SLOWDOWN),
-        // cpu_utilization is provided by the companion ProcCollector thread.
-        cpu_utilization: cpu_pct,
-    })
 }

@@ -10,11 +10,26 @@ pub enum ModelFormat {
     Gguf,
     TorchScript,
     SafeTensors,
+    /// A Hugging Face model directory (`config.json` + weights).
+    HfDirectory,
     Unknown,
 }
 
 impl ModelFormat {
     pub fn from_path(path: &Path) -> Self {
+        if path.is_dir() {
+            return if path.join("config.json").is_file() {
+                Self::HfDirectory
+            } else {
+                Self::Unknown
+            };
+        }
+        let sibling_config = path
+            .parent()
+            .is_some_and(|p| p.join("config.json").is_file());
+        if sibling_config && path.extension().is_some_and(|e| e == "safetensors") {
+            return Self::HfDirectory;
+        }
         match path.extension().and_then(|e| e.to_str()) {
             Some("onnx") => Self::Onnx,
             Some("gguf") => Self::Gguf,
@@ -30,6 +45,7 @@ impl ModelFormat {
             Self::Gguf => "GGUF",
             Self::TorchScript => "TorchScript",
             Self::SafeTensors => "SafeTensors",
+            Self::HfDirectory => "Hugging Face model directory",
             Self::Unknown => "Unknown",
         }
     }
@@ -41,7 +57,8 @@ impl ModelFormat {
 /// values, ensuring that runtime comparisons are apples-to-apples.
 #[derive(Debug, Clone)]
 pub struct BenchInput {
-    /// Flat f32 data in row-major order.
+    /// Flat f32 data in row-major order (used by in-process runtimes).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub data: Vec<f32>,
     /// Shape of the input tensor (e.g. [batch, seq_len] or [batch, C, H, W]).
     pub shape: Vec<usize>,
@@ -76,7 +93,7 @@ impl BenchInput {
             ModelFormat::Onnx => vec![b, 3, 224, 224],
             ModelFormat::TorchScript => vec![b, 3, 224, 224],
             // General embeddings: [batch, hidden_size]
-            ModelFormat::SafeTensors => vec![b, 512],
+            ModelFormat::SafeTensors | ModelFormat::HfDirectory => vec![b, 512],
             ModelFormat::Unknown => vec![b, 512],
         }
     }
@@ -111,5 +128,16 @@ mod tests {
         for (name, expected) in cases {
             assert_eq!(ModelFormat::from_path(Path::new(name)), expected, "{name}");
         }
+    }
+
+    #[test]
+    fn hf_directory_detection() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(ModelFormat::from_path(d.path()), ModelFormat::Unknown);
+        std::fs::write(d.path().join("config.json"), "{}").unwrap();
+        assert_eq!(ModelFormat::from_path(d.path()), ModelFormat::HfDirectory);
+        let st = d.path().join("model.safetensors");
+        std::fs::write(&st, b"x").unwrap();
+        assert_eq!(ModelFormat::from_path(&st), ModelFormat::HfDirectory);
     }
 }

@@ -1,151 +1,107 @@
+//! Sliding window of recent ticks that all analysis runs over.
+
 use std::collections::VecDeque;
-use std::time::Duration;
 
-use crate::collectors::RawSample;
+use crate::collectors::{StepEvent, Tick};
 
-/// Maximum number of samples retained in the window (5 minutes at 2-second intervals).
-pub const MAX_WINDOW_SIZE: usize = 150;
-
-/// Minimum number of samples needed for reliable statistics.
+/// Analysis horizon: the last five minutes.
+pub const WINDOW_SPAN_MS: u64 = 5 * 60 * 1000;
+/// Hard cap on retained ticks (5 min at 0.1 s).
+pub const MAX_WINDOW_TICKS: usize = 3000;
+/// Ticks (or steps) needed before figures are reported as reliable.
 pub const MIN_RELIABLE_SAMPLES: usize = 15;
 
-/// A sliding-window circular buffer of [`RawSample`] values.
-///
-/// The analytics pipeline (MFU, breakdown, bottleneck) operates over this
-/// window rather than the raw stream, providing smoothing and a bounded
-/// memory footprint.
 #[derive(Debug, Default)]
-pub struct MetricsWindow {
-    samples: VecDeque<RawSample>,
-    max_size: usize,
+pub struct TickWindow {
+    ticks: VecDeque<Tick>,
+    span_ms: u64,
+    max_len: usize,
 }
 
-impl MetricsWindow {
-    pub fn new(max_size: usize) -> Self {
+impl TickWindow {
+    pub fn new() -> Self {
+        Self::with_limits(WINDOW_SPAN_MS, MAX_WINDOW_TICKS)
+    }
+
+    pub fn with_limits(span_ms: u64, max_len: usize) -> Self {
         Self {
-            samples: VecDeque::with_capacity(max_size),
-            max_size,
+            ticks: VecDeque::new(),
+            span_ms,
+            max_len: max_len.max(1),
         }
     }
 
-    /// Add a sample, evicting the oldest if the window is full.
-    pub fn push(&mut self, sample: RawSample) {
-        if self.samples.len() == self.max_size {
-            self.samples.pop_front();
+    pub fn push(&mut self, tick: Tick) {
+        let newest = tick.timestamp_ms;
+        self.ticks.push_back(tick);
+        while self.ticks.len() > self.max_len {
+            self.ticks.pop_front();
         }
-        self.samples.push_back(sample);
+        while let Some(front) = self.ticks.front() {
+            if newest.saturating_sub(front.timestamp_ms) > self.span_ms && self.ticks.len() > 1 {
+                self.ticks.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Tick> {
+        self.ticks.iter()
+    }
+
+    pub fn latest(&self) -> Option<&Tick> {
+        self.ticks.back()
     }
 
     pub fn len(&self) -> usize {
-        self.samples.len()
+        self.ticks.len()
     }
 
+    #[allow(dead_code)] // pairs with `len` (clippy::len_without_is_empty)
     pub fn is_empty(&self) -> bool {
-        self.samples.is_empty()
+        self.ticks.is_empty()
     }
 
-    /// Duration spanned by samples in the window.
-    #[allow(dead_code)]
-    pub fn duration(&self) -> Duration {
-        match (self.samples.front(), self.samples.back()) {
-            (Some(first), Some(last)) => {
-                let ms = last.timestamp_ms.saturating_sub(first.timestamp_ms);
-                Duration::from_millis(ms)
-            }
-            _ => Duration::ZERO,
-        }
-    }
-
-    /// Duration in seconds, as an `f64`.  Convenience wrapper over [`duration`].
-    #[allow(dead_code)]
-    pub fn duration_secs(&self) -> f64 {
-        self.duration().as_secs_f64()
-    }
-
-    /// Returns `true` when there are enough samples for reliable statistics.
-    pub fn is_reliable(&self) -> bool {
-        self.samples.len() >= MIN_RELIABLE_SAMPLES
-    }
-
-    /// Iterate over all samples in chronological order.
-    pub fn iter(&self) -> impl Iterator<Item = &RawSample> {
-        self.samples.iter()
+    /// All hook step events currently in the window.
+    pub fn steps(&self) -> impl Iterator<Item = &StepEvent> {
+        self.ticks.iter().flat_map(|t| t.steps.iter())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::units::{Celsius, Mhz, Mib, Percent, Watts};
-
-    fn make_sample(timestamp_ms: u64) -> RawSample {
-        RawSample {
-            timestamp_ms,
-            gpu_index: 0,
-            sm_utilization: Percent(80.0),
-            sm_clock_mhz: Mhz(1800),
-            sm_clock_max_mhz: Mhz(2000),
-            vram_used_mib: Mib(8192),
-            vram_total_mib: Mib(24576),
-            mem_utilization: Percent(50.0),
-            temperature: Celsius(65.0),
-            power_draw: Watts(250.0),
-            power_limit: Watts(350.0),
-            throttle_thermal: false,
-            throttle_power: false,
-            throttle_hw_slowdown: false,
-            cpu_utilization: Percent(30.0),
-        }
-    }
+    use crate::collectors::testing::{gpu, tick};
 
     #[test]
-    fn window_evicts_oldest() {
-        let mut w = MetricsWindow::new(3);
-        w.push(make_sample(1000));
-        w.push(make_sample(2000));
-        w.push(make_sample(3000));
-        w.push(make_sample(4000)); // should evict sample at 1000
+    fn evicts_by_count() {
+        let mut w = TickWindow::with_limits(u64::MAX, 3);
+        for i in 0..5 {
+            w.push(tick(i * 1000, vec![gpu(0, 50.0)], None));
+        }
         assert_eq!(w.len(), 3);
         assert_eq!(w.iter().next().unwrap().timestamp_ms, 2000);
     }
 
     #[test]
-    fn duration_calculation() {
-        let mut w = MetricsWindow::new(150);
-        w.push(make_sample(1_000));
-        w.push(make_sample(3_000));
-        assert_eq!(w.duration().as_millis(), 2000);
-    }
-
-    #[test]
-    fn duration_secs_matches_duration() {
-        let mut w = MetricsWindow::new(150);
-        w.push(make_sample(0));
-        w.push(make_sample(5_000));
-        assert!((w.duration_secs() - 5.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn duration_secs_empty_is_zero() {
-        let w = MetricsWindow::new(10);
-        assert_eq!(w.duration_secs(), 0.0);
-    }
-
-    #[test]
-    fn is_reliable_at_threshold() {
-        let mut w = MetricsWindow::new(150);
-        for i in 0..14 {
-            w.push(make_sample(i as u64 * 2000));
+    fn evicts_by_age() {
+        let mut w = TickWindow::with_limits(10_000, 1000);
+        for i in 0..20 {
+            w.push(tick(i * 1000, vec![], None));
         }
-        assert!(!w.is_reliable(), "14 samples should not be reliable");
-        w.push(make_sample(14 * 2000));
-        assert!(w.is_reliable(), "15 samples should be reliable");
+        assert_eq!(w.iter().next().unwrap().timestamp_ms, 9000);
+        assert_eq!(w.latest().unwrap().timestamp_ms, 19000);
     }
 
     #[test]
-    fn single_sample_not_reliable() {
-        let mut w = MetricsWindow::new(150);
-        w.push(make_sample(0));
-        assert!(!w.is_reliable());
+    fn reliability_threshold() {
+        let mut w = TickWindow::new();
+        for i in 0..14 {
+            w.push(tick(i, vec![], None));
+        }
+        assert!(w.len() < MIN_RELIABLE_SAMPLES);
+        w.push(tick(14, vec![], None));
+        assert!(w.len() >= MIN_RELIABLE_SAMPLES);
     }
 }

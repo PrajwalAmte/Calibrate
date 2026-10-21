@@ -1,23 +1,12 @@
-use std::io::Write;
-use std::path::Path;
-use std::process::Command;
-use std::time::{Duration, Instant};
+//! TensorRT: builds an engine from ONNX (build time counts as load time) and runs it.
 
-use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use crate::bench::input::ModelFormat;
+use crate::bench::runtime::RuntimeDescriptor;
+use crate::bench::runtimes::subprocess::{python_module_available, SubprocessRuntime};
 
-use crate::bench::input::{BenchInput, ModelFormat};
-use crate::bench::runtime::{Runtime, RuntimeDescriptor};
+pub const NAME: &str = "tensorrt";
 
-// Embedded Python driver script
-
-/// Driver that converts an ONNX model to a TensorRT engine, runs inference,
-/// and streams timing results back as JSONL.
-///
-/// Engine compilation is counted as part of `load_ms` because TensorRT
-/// builds an optimised kernel for the target GPU at load time — this cost
-/// is real for any deployment that does not cache the engine.
-const DRIVER_SCRIPT: &str = r#"
+pub const SCRIPT: &str = r#"
 import sys, json, time, tempfile, os
 import numpy as np
 
@@ -121,166 +110,12 @@ elapsed = time.perf_counter() - (deadline - tput_window_s)
 emit({"type": "throughput_rps", "value": count / elapsed if elapsed > 0 else 0})
 "#;
 
-// Deserialization helpers
-
-#[derive(Deserialize)]
-#[serde(tag = "type")]
-enum DriverRecord {
-    #[serde(rename = "load_ms")]
-    LoadMs { value: f64 },
-    #[serde(rename = "latency_us")]
-    LatencyUs { value: u64 },
-    #[serde(rename = "throughput_rps")]
-    ThroughputRps { value: f64 },
-    #[serde(rename = "error")]
-    Error { message: String },
-}
-
-fn parse_driver_output(stdout: &[u8]) -> Result<Vec<DriverRecord>> {
-    let text = std::str::from_utf8(stdout)?;
-    let mut records = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let record: DriverRecord = serde_json::from_str(line)
-            .with_context(|| format!("failed to parse driver line: {line}"))?;
-        records.push(record);
-    }
-    Ok(records)
-}
-
-// TensorRtRuntime
-
-pub struct TensorRtRuntime {
-    model_path: Option<std::path::PathBuf>,
-    latency_samples_us: Vec<u64>,
-    throughput_rps: f64,
-    load_ms: u64,
-}
-
-impl TensorRtRuntime {
-    pub fn new() -> Self {
-        Self {
-            model_path: None,
-            latency_samples_us: Vec::new(),
-            throughput_rps: 0.0,
-            load_ms: 0,
-        }
-    }
-
-    pub fn descriptor() -> RuntimeDescriptor {
-        RuntimeDescriptor {
-            name: "tensorrt",
-            is_available: || {
-                // TensorRT requires both the tensorrt Python package and pycuda.
-                Command::new("python3")
-                    .args(["-c", "import tensorrt; import pycuda.driver"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-            },
-            // TensorRT only accepts ONNX as input (builds an engine from it).
-            is_compatible: |fmt| matches!(fmt, ModelFormat::Onnx),
-            create: || Box::new(TensorRtRuntime::new()),
-        }
-    }
-
-    fn write_driver() -> Result<tempfile::NamedTempFile> {
-        let mut f = tempfile::Builder::new()
-            .prefix("calibrate_trt_")
-            .suffix(".py")
-            .tempfile()?;
-        f.write_all(DRIVER_SCRIPT.as_bytes())?;
-        f.flush()?;
-        Ok(f)
-    }
-}
-
-impl Runtime for TensorRtRuntime {
-    fn name(&self) -> &str {
-        "tensorrt"
-    }
-
-    fn load(&mut self, model_path: &Path) -> Result<Duration> {
-        if !model_path.exists() {
-            bail!("model file not found: {}", model_path.display());
-        }
-        self.model_path = Some(model_path.to_path_buf());
-        self.latency_samples_us.clear();
-        self.throughput_rps = 0.0;
-        self.load_ms = 0;
-        Ok(Duration::ZERO)
-    }
-
-    fn infer(&mut self, input: &BenchInput) -> Result<()> {
-        if !self.latency_samples_us.is_empty() {
-            return Ok(());
-        }
-
-        let model_path = self
-            .model_path
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("tensorrt: load() not called"))?;
-
-        let batch_size = input.shape.first().copied().unwrap_or(1);
-        let driver = Self::write_driver()?;
-
-        let _t0 = Instant::now();
-        let output = Command::new("python3")
-            .args([
-                driver.path().to_str().unwrap_or_default(),
-                model_path.to_str().unwrap_or_default(),
-                &batch_size.to_string(),
-                "20",
-                "100",
-                "5.0",
-            ])
-            .output()
-            .context("failed to launch tensorrt driver subprocess")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("tensorrt driver exited with {}: {}", output.status, stderr);
-        }
-
-        let records = parse_driver_output(&output.stdout)?;
-        let mut has_error = false;
-        for record in records {
-            match record {
-                DriverRecord::LoadMs { value } => self.load_ms = value as u64,
-                DriverRecord::LatencyUs { value } => self.latency_samples_us.push(value),
-                DriverRecord::ThroughputRps { value } => self.throughput_rps = value,
-                DriverRecord::Error { message } => {
-                    eprintln!("tensorrt driver error: {message}");
-                    has_error = true;
-                }
-            }
-        }
-
-        if has_error {
-            bail!("tensorrt driver reported errors (see stderr)");
-        }
-
-        Ok(())
-    }
-
-    fn unload(&mut self) {
-        self.model_path = None;
-        self.latency_samples_us.clear();
-        self.throughput_rps = 0.0;
-        self.load_ms = 0;
-    }
-
-    fn pre_collected_samples(&mut self) -> Option<(Vec<u64>, f64, u64)> {
-        if self.latency_samples_us.is_empty() {
-            return None;
-        }
-        Some((
-            std::mem::take(&mut self.latency_samples_us),
-            self.throughput_rps,
-            self.load_ms,
-        ))
+pub fn descriptor() -> RuntimeDescriptor {
+    RuntimeDescriptor {
+        name: NAME,
+        is_available: || python_module_available("tensorrt") && python_module_available("pycuda"),
+        is_compatible: |fmt| matches!(fmt, ModelFormat::Onnx),
+        create: || Box::new(SubprocessRuntime::new(NAME, SCRIPT)),
+        opt_in: false,
     }
 }
