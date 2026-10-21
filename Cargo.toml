@@ -67,7 +67,7 @@ parking_lot = "0.12"
 hdrhistogram = "7"
 
 # XDG cache directory (~/.cache/calibrate/)
-directories = "5"
+directories = "6"
 
 # Linux /proc parsing
 libc = "0.2"
