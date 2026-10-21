@@ -289,10 +289,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn iokit_reports_at_least_one_gpu_with_utilization() {
+    fn iokit_reports_a_gpu_and_never_fabricates_utilization() {
         let stats = query_gpu_stats().expect("IOKit must be reachable on macOS");
         assert!(!stats.is_empty(), "no IOAccelerator found");
-        assert!(stats.iter().any(|s| s.utilization_pct.is_some()));
+        // Virtualized Macs (CI runners) expose the accelerator but no
+        // utilization counter: that must surface as `None`, not as 0.
+        for s in &stats {
+            if let Some(u) = s.utilization_pct {
+                assert!((0.0..=100.0).contains(&u), "utilization out of range: {u}");
+            }
+        }
     }
 
     #[test]
@@ -300,6 +306,12 @@ mod tests {
         let mut b = AppleBackend::new("Apple GPU".into()).unwrap();
         let s = b.sample();
         assert!(!s.is_empty());
+        let raw = query_gpu_stats().unwrap();
+        assert_eq!(
+            s[0].util_pct.is_none(),
+            raw[0].utilization_pct.is_none(),
+            "a missing counter must stay missing"
+        );
         assert_eq!(s[0].temperature_c, None);
         assert_eq!(s[0].power_w, None);
         assert!(s[0].vram_total_mib.unwrap_or(0) > 0);

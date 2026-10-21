@@ -10,6 +10,12 @@ targets = [
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # `paste` is an archived proc-macro pulled in by ratatui 0.29 and metal 0.29.
+    # It runs only at compile time (no runtime code, no network or untrusted
+    # input) and has no known vulnerability. Revisit when ratatui/metal drop it.
+    { id = "RUSTSEC-2024-0436", reason = "build-time-only proc-macro; transitive via ratatui and metal" },
+]
 
 [licenses]
 version = 2
@@ -23,8 +29,6 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
-    "CDLA-Permissive-2.0",
     "MPL-2.0",
 ]
 

@@ -131,7 +131,7 @@ mod tests {
                 "regions_with_capacity_available":[]}
         }});
         let mut l = parse(&v).unwrap();
-        l.sort_by(|a, b| a.gpu_count.cmp(&b.gpu_count));
+        l.sort_by_key(|a| a.gpu_count);
         assert_eq!(l.len(), 2);
         assert_eq!(l[0].gpu_model, "A10 PCIe");
         assert!(l[0].flags.contains(&ListingFlag::CurrentlyUnavailable));
