@@ -39,8 +39,11 @@ jobs:
       - name: Install cargo-zigbuild
         if: matrix.zig
         run: |
-          python3 -m pip install --user ziglang==0.13.0
-          cargo install cargo-zigbuild --locked --version 0.19.8
+          # Versions verified together: zigbuild >= 0.24 filters rustc's
+          # --fix-cortex-a53-843419 linker flag, which zig's linker rejects
+          # (0.19.8 failed the aarch64 build with "unsupported linker arg").
+          python3 -m pip install --user ziglang==0.14.1
+          cargo install cargo-zigbuild --locked --version 0.24.0
       - name: Build (zig, glibc ${{ matrix.glibc }})
         if: matrix.zig
         run: cargo zigbuild --release --locked --target ${{ matrix.target }}.${{ matrix.glibc }}
