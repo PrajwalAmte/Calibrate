@@ -51,7 +51,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 toml = "0.8"
 
 # Runtime loading of optional NVML GPM symbols (absent on older drivers)
-libloading = "0.8"
+libloading = "0.9"
 
 # MPSC channel bridging std::thread → tokio
 flume = "0.11"
