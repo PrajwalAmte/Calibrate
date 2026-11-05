@@ -1,0 +1,24 @@
+Soft targets from calibration answers, as P(same): [("another_candidate_matched_better", 0.50), ("chain_branch", 0.71), ("different_kind_of_place", 0.19), ("different_phones", 0.14), ("name_contains_other", 1.00), ("name_distance", 0.96), ("name_words_match", 0.94), ("names_differ", 0.53), ("never_compared", 0.21), ("same_name_nearby", 1.00), ("same_name_same_spot", 1.00), ("shared_phone", 1.00), ("shared_website", 0.77), ("spelling_variant", 1.00), ("too_far_for_weak_name_match", 0.10)]
+pid=6327 params=22565763 pairs=19332 same=17357 different=1975
+step   20/400  loss 0.6736  0.90 steps/s
+step   40/400  loss 0.6490  1.23 steps/s
+step   60/400  loss 0.6124  1.37 steps/s
+step   80/400  loss 0.5680  1.44 steps/s
+step  100/400  loss 0.5385  1.52 steps/s
+step  120/400  loss 0.5413  1.57 steps/s
+step  140/400  loss 0.5139  1.58 steps/s
+step  160/400  loss 0.4938  1.59 steps/s
+step  180/400  loss 0.5072  1.59 steps/s
+step  200/400  loss 0.4889  1.60 steps/s
+step  220/400  loss 0.4741  1.60 steps/s
+step  240/400  loss 0.4894  1.61 steps/s
+step  260/400  loss 0.4770  1.63 steps/s
+step  280/400  loss 0.4782  1.64 steps/s
+step  300/400  loss 0.4541  1.65 steps/s
+step  320/400  loss 0.4600  1.66 steps/s
+step  340/400  loss 0.4459  1.66 steps/s
+step  360/400  loss 0.4617  1.67 steps/s
+step  380/400  loss 0.4674  1.66 steps/s
+step  400/400  loss 0.4809  1.66 steps/s
+Training took 241 s.
+Scores for the checked pairs are in ../data/neural_scores_soft.csv.

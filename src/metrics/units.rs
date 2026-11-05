@@ -70,6 +70,24 @@ pub fn fmt_usd(v: f64) -> String {
     format!("${v:.2}")
 }
 
+/// "950", "12.3K", "1.24M", "8.03B".
+pub fn fmt_count(v: f64) -> String {
+    let (d, suffix) = match v.abs() {
+        a if a >= 1e9 => (1e9, "B"),
+        a if a >= 1e6 => (1e6, "M"),
+        a if a >= 1e3 => (1e3, "K"),
+        _ => return format!("{v:.0}"),
+    };
+    let x = v / d;
+    if x.abs() >= 100.0 {
+        format!("{x:.0}{suffix}")
+    } else if x.abs() >= 10.0 {
+        format!("{x:.1}{suffix}")
+    } else {
+        format!("{x:.2}{suffix}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +107,10 @@ mod tests {
         assert_eq!(fmt_usd(0.0), "$0.00");
         assert_eq!(fmt_usd(12.345), "$12.35");
         assert_eq!(fmt_usd(1234567.0), "$1,234,567");
+        assert_eq!(fmt_count(950.0), "950");
+        assert_eq!(fmt_count(1_237_248.0), "1.24M");
+        assert_eq!(fmt_count(22_565_763.0), "22.6M");
+        assert_eq!(fmt_count(8.03e9), "8.03B");
+        assert_eq!(fmt_count(150_000.0), "150K");
     }
 }

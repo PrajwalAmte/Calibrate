@@ -18,7 +18,13 @@ JSON, the gauge label in the TUI):
 | `unavailable` | no GPU data | `mfu_pct` is `null`, never 0. |
 
 Tensor-active is used only when *every* GPU sample in the window has it, so a
-figure never mixes two kinds of measurement.
+figure never mixes two kinds of measurement. Percentiles and the session peak
+are kept for the best source seen: when the hook's first steps arrive they
+restart, so seconds of busy-time readings at start-up never pollute measured
+MFU statistics.
+
+Instrumented MFU is only as meaningful as the declared FLOPs. Counting padding
+tokens raises MFU without raising throughput — see [hook.md](hook.md#count-real-tokens-not-padding).
 
 **Clock ratio.** Peak TFLOPS are specified at the boost clock, so activity at a
 lower clock delivers proportionally less. calibrate divides by the spec
@@ -62,7 +68,7 @@ Checked in this order; the first match is reported with one recommendation:
 `hardware_slowdown` → `gpu_imbalance` (busy spread > 20 ppt) →
 `data_loader` (wait > 15 %) → `sync_stall` (> 10 %) → `memory_bound` (> 15 %) →
 `optimizer_heavy` (> 20 %, instrumented only) → `clock_underspeed` (busy > 50 %,
-clock < 85 % of boost, no throttle reason) → `erratic_steps` (step-time CV > 0.3)
+clock < 85 % of boost, no throttle reason) → `erratic_steps` (see below)
 → `below_target_mfu` → `unverified` (only a busy-time bound, and it is above
 target) → `none`.
 
@@ -80,8 +86,16 @@ an input-pipeline wait of fraction *w* raises throughput by 1/(1−*w*).
   waste are integrated over the session. With a busy-time upper bound the waste
   is a lower bound (`is_lower_bound`). A GPU the job holds but does not use
   counts as 100 % waste.
-* **Steps** (`steps`, hook only): mean/p50/p95 step time, coefficient of
-  variation, steps/s, tokens/s and samples/s summed over ranks.
+* **Steps** (`steps`, hook only): mean/p50/p95 step time, steps/s, tokens/s
+  and samples/s summed over ranks. The first 10 steps of a run (by step number)
+  are excluded as warm-up: model load and kernel compilation can make step 1
+  fifty times slower than step 100. Steps are **erratic** when, over at least
+  10 settled steps, the robust spread (1.4826 · MAD / median) exceeds 0.3, or
+  occasional long steps take more than 20 % of step time. A single slow step
+  does not count. When tokens per step are constant, the advice says sequence
+  length is not the cause.
+* **Throttle reasons** are `null` where the platform cannot report them
+  (macOS), and shown as N/A rather than "none".
 
 ## Platform notes
 

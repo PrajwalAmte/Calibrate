@@ -1,4 +1,4 @@
-use crate::metrics::units::fmt_usd;
+use crate::metrics::units::fmt_count;
 use crate::plan::{ListingFlag, PlanReport, RankedListing};
 
 /// Render the plan report as text.
@@ -14,14 +14,14 @@ pub fn render_to_string(report: &PlanReport, budget: Option<f64>) -> String {
 
     ln(String::new());
     let moe = if (m.active_param_count_b - m.param_count_b).abs() > 0.01 {
-        format!(", {:.2}B active", m.active_param_count_b)
+        format!(", {} active", fmt_count(m.active_param_count_b * 1e9))
     } else {
         String::new()
     };
     ln(format!(
-        "  Model:     {}  ({:.2}B parameters{moe}; source: {})",
+        "  Model:     {}  ({} parameters{moe}; source: {})",
         m.model_id,
-        m.param_count_b,
+        fmt_count(m.param_count_b * 1e9),
         serde_json::to_value(m.param_source)
             .ok()
             .and_then(|x| x.as_str().map(str::to_string))
@@ -42,8 +42,8 @@ pub fn render_to_string(report: &PlanReport, budget: Option<f64>) -> String {
     ));
     if let (Some(t), Some(f)) = (w.total_tokens, w.total_hardware_flops) {
         ln(format!(
-            "  Work:      {:.2}B tokens × {} epoch(s) → {:.2e} FLOPs (incl. recomputation)",
-            t / 1e9 / w.epochs.max(1) as f64,
+            "  Work:      {} tokens × {} epoch(s) → {:.2e} FLOPs (incl. recomputation)",
+            fmt_count(t / w.epochs.max(1) as f64),
             w.epochs,
             f
         ));
@@ -60,7 +60,7 @@ pub fn render_to_string(report: &PlanReport, budget: Option<f64>) -> String {
         ("Optimizer states", v.optimizer_gib),
         ("Activations (checkpointed)", v.activations_gib),
         ("Logits + loss buffer", v.logits_gib),
-        ("CUDA context + allocator", v.overhead_gib),
+        ("Runtime + allocator", v.overhead_gib),
     ] {
         ln(format!("  {name:<28}  {val:>8.2}"));
     }
@@ -188,7 +188,6 @@ pub fn render_to_string(report: &PlanReport, budget: Option<f64>) -> String {
             ln(format!("    {}: {}", s.name, s.reason));
         }
     }
-    let _ = fmt_usd;
     ln(String::new());
     o
 }

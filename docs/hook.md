@@ -1,4 +1,4 @@
-# The calibrate Python hook
+# The calibrate training hook
 
 `calibrate_hook` (in `python/`) turns estimates into measurements: real step
 times, an exact data-wait / compute / optimizer split, and MFU from declared
@@ -16,7 +16,7 @@ import calibrate_hook
 
 hook = calibrate_hook.start(model=model, seq_len=2048)   # mode="lora" for LoRA/QLoRA
 for batch in loader:                                     # time here = data wait
-    with hook.step(tokens=batch["input_ids"].numel()):
+    with hook.step(tokens=int(batch["attention_mask"].sum()), samples=len(batch["input_ids"])):
         with hook.phase("compute"):
             loss = model(**batch).loss
             loss.backward()
@@ -24,6 +24,16 @@ for batch in loader:                                     # time here = data wait
             optimizer.step()
             optimizer.zero_grad()
 ```
+
+### Count real tokens, not padding
+
+MFU is only as meaningful as the FLOPs you declare. Pass `tokens=` as the
+**non-padding** tokens of the batch (`attention_mask.sum()`), not
+`input_ids.numel()`. Padding is computed by the GPU, so declaring it raises
+MFU without any gain in useful work. In a real run, padding every example to a
+fixed length raised reported MFU by about 60% while samples per second stayed
+flat. Also pass `samples=`: samples/s, shown in the TUI, is the figure to
+compare across configurations because padding cannot inflate it.
 
 `start(model=...)` derives FLOPs per token as `6N + 12·L·H·S` (PaLM appendix B;
 `4N` for `mode="lora"`), using the model's parameter count and — for Hugging
@@ -39,7 +49,7 @@ from calibrate_hook.integrations import hf_callback, lightning_callback
 Trainer(..., callbacks=[hf_callback(seq_len=2048)],
         args=TrainingArguments(..., include_num_input_tokens_seen=True))
 
-L.Trainer(callbacks=[lightning_callback(tokens_fn=lambda b: b["input_ids"].numel())])
+L.Trainer(callbacks=[lightning_callback(tokens_fn=lambda b: int(b["attention_mask"].sum()))])
 ```
 
 With gradient accumulation the HF callback reports optimizer steps, so data
@@ -80,7 +90,7 @@ Newline-delimited JSON over a Unix stream socket, server → client only.
 
 ```json
 {"v":1,"type":"hello","pid":4242,"rank":0,"world_size":8,"framework":"pytorch",
- "device":"cuda:0","sync":"step","hook_version":"0.2.0"}
+ "device":"cuda:0","sync":"step","hook_version":"0.2.1"}
 {"v":1,"type":"step","pid":4242,"rank":0,"step":17,"t_end_ms":1760000000000,
  "step_s":0.412,"data_s":0.051,"compute_s":0.301,"optimizer_s":0.042,
  "tokens":65536,"samples":32,"flops":3.1e15}
@@ -94,5 +104,7 @@ Newline-delimited JSON over a Unix stream socket, server → client only.
 | `flops` | model FLOPs performed in this step |
 
 Readers ignore unknown fields and message types; a message with a `v` newer
-than the reader supports is ignored. Anything that speaks this protocol (JAX,
-custom frameworks, other languages) works with calibrate.
+than the reader supports is ignored. Anything that speaks this protocol works with calibrate. It has been used
+from a Rust trainer (Burn on Metal) with no changes to calibrate. Send
+`"framework"` in the hello message: calibrate uses it to avoid suggesting
+PyTorch-specific settings to other frameworks.

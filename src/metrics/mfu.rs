@@ -34,10 +34,20 @@ impl MfuSource {
     /// Short label for displays.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Instrumented => "MFU",
+            Self::Instrumented => "MFU (measured)",
             Self::TensorActive => "MFU (est., tensor-core activity)",
             Self::KernelBusy => "MFU upper bound (GPU busy time)",
             Self::Unavailable => "MFU",
+        }
+    }
+
+    /// Measurement quality, for keeping session statistics to one kind of figure.
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Unavailable => 0,
+            Self::KernelBusy => 1,
+            Self::TensorActive => 2,
+            Self::Instrumented => 3,
         }
     }
 }

@@ -200,16 +200,13 @@ impl NvmlBackend {
             };
             let util = device.utilization_rates().ok();
             let mem = device.memory_info().ok();
-            let throttle = device
-                .current_throttle_reasons()
-                .map(|r| Throttle {
-                    hw_thermal: r.contains(ThrottleReasons::HW_THERMAL_SLOWDOWN),
-                    sw_thermal: r.contains(ThrottleReasons::SW_THERMAL_SLOWDOWN),
-                    power_cap: r.contains(ThrottleReasons::SW_POWER_CAP),
-                    hw_slowdown: r.contains(ThrottleReasons::HW_SLOWDOWN)
-                        || r.contains(ThrottleReasons::HW_POWER_BRAKE_SLOWDOWN),
-                })
-                .unwrap_or_default();
+            let throttle = device.current_throttle_reasons().ok().map(|r| Throttle {
+                hw_thermal: r.contains(ThrottleReasons::HW_THERMAL_SLOWDOWN),
+                sw_thermal: r.contains(ThrottleReasons::SW_THERMAL_SLOWDOWN),
+                power_cap: r.contains(ThrottleReasons::SW_POWER_CAP),
+                hw_slowdown: r.contains(ThrottleReasons::HW_SLOWDOWN)
+                    || r.contains(ThrottleReasons::HW_POWER_BRAKE_SLOWDOWN),
+            });
             out.push(GpuSample {
                 index,
                 name: device.name().unwrap_or_else(|_| format!("GPU {index}")),

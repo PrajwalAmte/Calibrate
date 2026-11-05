@@ -6,7 +6,7 @@ Usage::
 
     hook = calibrate_hook.start(model=model)          # FLOPs/token from the model
     for batch in loader:                              # time spent here = data wait
-        with hook.step(tokens=batch["input_ids"].numel()):
+        with hook.step(tokens=int(batch["attention_mask"].sum()), samples=len(batch["input_ids"])):
             loss = model(**batch).loss
             loss.backward()
             optimizer.step()
@@ -41,7 +41,7 @@ __all__ = [
     "socket_path",
     "PROTOCOL_VERSION",
 ]
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 PROTOCOL_VERSION = 1
 
@@ -231,6 +231,9 @@ class Hook:
         samples: Optional[int] = None,
         flops: Optional[float] = None,
     ) -> Iterator["Hook"]:
+        """Time one step. ``tokens`` should exclude padding (``attention_mask.sum()``):
+        padded tokens are computed but are not useful work, and counting them
+        inflates MFU without raising throughput."""
         self.step_begin()
         try:
             yield self

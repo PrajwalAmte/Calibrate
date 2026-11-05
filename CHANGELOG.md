@@ -3,6 +3,45 @@
 All notable changes are documented here. The JSON output formats are
 versioned separately (see `docs/json-schema.md`).
 
+## [0.2.1]
+
+Found by running calibrate on a real fine-tuning job (`evidence/calibrate/`).
+
+### Fixed
+- MFU percentiles and the session peak mixed busy-time readings from before the
+  hook's first steps with measured MFU (a run measuring 7.8% showed "peak 54.1%,
+  p95 29%"). Statistics now restart when a better source appears and ignore
+  worse ones.
+- "Erratic steps" fired on steady jobs because the first, slow warm-up step
+  dominated the coefficient of variation (CV 1.28 on a fixed-length job with
+  45 ms steps). Warm-up steps are excluded, and erratic now uses a robust spread
+  plus the share of time lost to long steps.
+- Erratic-step advice listed variable sequence lengths even when tokens per
+  step were constant; it now says so and names the measured cause.
+- PyTorch- and CUDA-specific advice (e.g. `PYTORCH_CUDA_ALLOC_CONF`) was shown
+  on Apple GPUs and to non-PyTorch jobs. Advice now follows the device and the
+  framework the hook reports.
+- "Throttle: none" was shown (and exported as 0) on macOS, which cannot report
+  throttling. Throttle is now `null` / N/A when unknown, also when NVML fails.
+- The live view said "measured by the Python hook" for any hook; it now says
+  "training hook". The header's "source" became "GPU counters" so it is not
+  confused with the MFU source, which now reads "MFU (measured)".
+- The optimizer bar used dark blue, unreadable on dark terminals.
+- The session summary broke words at the terminal edge; it now wraps on words.
+- `plan` printed "0.00B tokens" and "0.02B parameters" for small jobs; counts
+  now use K/M/B. Apple GPU listings no longer include the 0.75 GiB CUDA context,
+  and the overhead row is labelled "Runtime + allocator".
+
+### Added
+- Samples/s in the live view, the padding-proof throughput figure.
+- Docs: count non-padding tokens for meaningful MFU; plan for a local machine
+  with a `--prices-file`.
+
+### Schema notes
+- `gpus[].throttle` may now be `null` (it was always an object). This brings it
+  in line with the documented "unavailable is null" rule; `schema_version` stays 1.
+- New `steps` fields: `robust_cv`, `stall_time_pct`, `tokens_cv`.
+
 ## [0.2.0]
 
 ### Fixed

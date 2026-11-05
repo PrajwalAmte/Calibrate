@@ -1,0 +1,23 @@
+pid=5648 params=22565763 pairs=19332 same=17357 different=1975
+step   20/400  loss 0.6781  1.37 steps/s
+step   40/400  loss 0.6584  1.86 steps/s
+step   60/400  loss 0.5574  2.13 steps/s
+step   80/400  loss 0.5212  2.21 steps/s
+step  100/400  loss 0.5014  2.30 steps/s
+step  120/400  loss 0.4601  2.37 steps/s
+step  140/400  loss 0.4515  2.42 steps/s
+step  160/400  loss 0.4069  2.48 steps/s
+step  180/400  loss 0.4313  2.53 steps/s
+step  200/400  loss 0.3748  2.57 steps/s
+step  220/400  loss 0.3760  2.60 steps/s
+step  240/400  loss 0.3825  2.62 steps/s
+step  260/400  loss 0.3679  2.64 steps/s
+step  280/400  loss 0.3788  2.67 steps/s
+step  300/400  loss 0.3407  2.68 steps/s
+step  320/400  loss 0.3656  2.69 steps/s
+step  340/400  loss 0.3179  2.70 steps/s
+step  360/400  loss 0.3419  2.72 steps/s
+step  380/400  loss 0.3615  2.59 steps/s
+step  400/400  loss 0.3709  2.50 steps/s
+Training took 160 s.
+Scores for the checked pairs are in ../data/neural_scores_hard.csv.

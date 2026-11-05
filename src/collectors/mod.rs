@@ -99,8 +99,9 @@ pub struct GpuSample {
     pub temperature_c: Option<f32>,
     pub power_w: Option<f32>,
     pub power_limit_w: Option<f32>,
+    /// `None` when the platform does not report throttle reasons.
     #[serde(default)]
-    pub throttle: Throttle,
+    pub throttle: Option<Throttle>,
 }
 
 impl GpuSample {
@@ -195,7 +196,7 @@ pub mod testing {
             temperature_c: Some(65.0),
             power_w: Some(200.0),
             power_limit_w: Some(350.0),
-            throttle: Throttle::default(),
+            throttle: Some(Throttle::default()),
         }
     }
 

@@ -197,20 +197,22 @@ pub fn points(s: &SessionSnapshot) -> Vec<Point> {
             g.power_limit_w.map(f64::from),
             &gl,
         );
-        for (reason, on) in [
-            ("hw_thermal", g.throttle.hw_thermal),
-            ("sw_thermal", g.throttle.sw_thermal),
-            ("power_cap", g.throttle.power_cap),
-            ("hw_slowdown", g.throttle.hw_slowdown),
-        ] {
-            let mut l = gl.to_vec();
-            l.push(("reason", reason.to_string()));
-            b.gauge(
-                "calibrate_gpu_throttle",
-                "1 when the throttle reason is active.",
-                Some(on as u8 as f64),
-                &l,
-            );
+        if let Some(t) = g.throttle {
+            for (reason, on) in [
+                ("hw_thermal", t.hw_thermal),
+                ("sw_thermal", t.sw_thermal),
+                ("power_cap", t.power_cap),
+                ("hw_slowdown", t.hw_slowdown),
+            ] {
+                let mut l = gl.to_vec();
+                l.push(("reason", reason.to_string()));
+                b.gauge(
+                    "calibrate_gpu_throttle",
+                    "1 when the throttle reason is active.",
+                    Some(on as u8 as f64),
+                    &l,
+                );
+            }
         }
         b.gauge(
             "calibrate_gpu_memory_growing",

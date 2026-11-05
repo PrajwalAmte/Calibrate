@@ -14,7 +14,7 @@ import calibrate_hook
 
 hook = calibrate_hook.start(model=model, seq_len=2048)   # mode="lora" for LoRA
 for batch in loader:
-    with hook.step(tokens=batch["input_ids"].numel()):
+    with hook.step(tokens=int(batch["attention_mask"].sum()), samples=len(batch["input_ids"])):
         loss = model(**batch).loss
         loss.backward()
         optimizer.step()
@@ -33,7 +33,7 @@ Lightning:
 
 ```python
 from calibrate_hook.integrations import lightning_callback
-trainer = L.Trainer(callbacks=[lightning_callback(tokens_fn=lambda b: b["input_ids"].numel())])
+trainer = L.Trainer(callbacks=[lightning_callback(tokens_fn=lambda b: int(b["attention_mask"].sum()))])
 ```
 
 See `docs/hook.md` in the calibrate repository for the protocol, the `sync`

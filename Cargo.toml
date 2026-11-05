@@ -1,6 +1,6 @@
 [package]
 name = "calibrate"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Prajwal Amte <prajwalamte@gmail.com>"]
 description = "GPU training efficiency analyzer — MFU, bottleneck detection, cost planning and exporters for NVIDIA and Apple Silicon workloads"
@@ -15,6 +15,7 @@ rust-version = "1.88"
 exclude = [
     ".github/",
     "*.md.bak",
+    "evidence/",
 ]
 
 [[bin]]

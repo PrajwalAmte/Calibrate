@@ -34,6 +34,34 @@ macOS) are shown as N/A, never as 0. Details: [docs/metrics.md](docs/metrics.md)
 
 ---
 
+## A real run
+
+calibrate v0.2.0 watching a real fine-tuning job: a 22.6M-parameter MiniLM
+cross-encoder trained in **Rust** (Burn on Metal) on a MacBook Air M1. The
+trainer publishes steps with the [hook protocol](docs/hook.md#protocol-v1)
+directly from Rust, so nothing in calibrate was specific to it.
+
+| Live view, 1 min 40 s in | End-of-run summary |
+| --- | --- |
+| ![calibrate watch live view](evidence/calibrate/screenshots/watch-live.png) | ![calibrate session summary](evidence/calibrate/screenshots/session-summary.png) |
+
+**What it showed:** the GPU was busy about 95% of the time, yet measured MFU
+was **7.9%**. On utilization alone this run looks healthy; the hook shows most
+of the GPU's capacity going unused. The breakdown ruled out the input pipeline
+(0.0% waiting for data, 91.5% forward and backward).
+
+**What it taught us:** this run found real bugs, all fixed since these
+screenshots (see [CHANGELOG](CHANGELOG.md)). The "p95 46.4%" and "peak 54.1%"
+figures are start-up busy time leaking into the measured statistics, and the
+"erratic" finding was largely the slow first step. The screen also says
+"Python hook" for a Rust hook, offers `PYTORCH_CUDA_ALLOC_CONF` to a Burn job
+on Metal, and shows "Throttle: none" where macOS cannot report throttling.
+Re-running the same recorded trace now gives peak 13.6% instead of 51% and no
+false "erratic" finding. The raw sessions, the experiment logs and the full
+write-up are in [evidence/calibrate](evidence/calibrate/README.md).
+
+---
+
 ## Subcommands
 
 | Command | Description |
@@ -51,7 +79,7 @@ macOS) are shown as N/A, never as 0. Details: [docs/metrics.md](docs/metrics.md)
 **Release binaries** (from v0.2.0) — Linux x86-64 / ARM64 (glibc ≥ 2.17) and macOS:
 
 ```bash
-VERSION=v0.2.0 TARGET=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu, aarch64-apple-darwin
+VERSION=v0.2.1 TARGET=x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu, aarch64-apple-darwin
 curl -LO https://github.com/PrajwalAmte/Calibrate/releases/download/$VERSION/calibrate-$VERSION-$TARGET.tar.gz
 curl -LO https://github.com/PrajwalAmte/Calibrate/releases/download/$VERSION/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
@@ -64,7 +92,7 @@ Every artifact has a signed build-provenance attestation
 **Container image** (linux/amd64, linux/arm64):
 
 ```bash
-docker run --rm --gpus all ghcr.io/prajwalamte/calibrate:0.2.0 diagnose
+docker run --rm --gpus all ghcr.io/prajwalamte/calibrate:0.2.1 diagnose
 ```
 
 **From source** (Rust 1.88+):
@@ -116,7 +144,7 @@ SIGINT stop it cleanly, so it works under systemd and Kubernetes.
 import calibrate_hook
 hook = calibrate_hook.start(model=model, seq_len=2048)
 for batch in loader:
-    with hook.step(tokens=batch["input_ids"].numel()):
+    with hook.step(tokens=int(batch["attention_mask"].sum()), samples=len(batch["input_ids"])):
         ...  # forward, backward, optimizer step
 ```
 

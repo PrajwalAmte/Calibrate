@@ -24,7 +24,7 @@ One `{"event":"snapshot", ...}` per sample tick, then one
 {
   "event": "snapshot",
   "schema_version": 1,
-  "calibrate_version": "0.2.0",
+  "calibrate_version": "0.2.1",
   "timestamp_ms": 1760000038000,
   "elapsed_secs": 38.0,
   "target": { "mode": "process", "pid": 4242, "process_count": 9,
@@ -48,7 +48,7 @@ One `{"event":"snapshot", ...}` per sample tick, then one
               "vram_used_mib": 61234, "vram_total_mib": 81559, "peak_vram_mib": 62001,
               "temperature_c": 61.0, "power_w": 612.0, "power_limit_w": 700.0,
               "throttle": { "hw_thermal": false, "sw_thermal": false,
-                            "power_cap": false, "hw_slowdown": false },
+                            "power_cap": false, "hw_slowdown": false },  // null if not reported (macOS)
               "vram_growing": false } ],
   "cpu_pct": 412.0,                  // process tree, % of one core
   "steps": null,                     // StepStats when the hook is active
@@ -65,8 +65,9 @@ One `{"event":"snapshot", ...}` per sample tick, then one
 ```
 
 `bottleneck` values are listed in [metrics.md](metrics.md#bottlenecks).
-`steps` (hook only): `steps_in_window, mean_ms, p50_ms, p95_ms, cv, erratic,
-steps_per_sec, tokens_per_sec, samples_per_sec, ranks`.
+`steps` (hook only): `steps_in_window, mean_ms, p50_ms, p95_ms, cv,
+robust_cv, stall_time_pct, erratic, tokens_cv, steps_per_sec, tokens_per_sec,
+samples_per_sec, ranks`. Timing fields exclude the first 10 (warm-up) steps.
 
 ```jsonc
 { "event": "session_end", "schema_version": 1, "elapsed_secs": 600.0,
@@ -80,7 +81,7 @@ steps_per_sec, tokens_per_sec, samples_per_sec, ranks`.
 First line is a header, then one tick per line:
 
 ```jsonc
-{"calibrate_trace":1,"calibrate_version":"0.2.0","backend":"nvml",
+{"calibrate_trace":1,"calibrate_version":"0.2.1","backend":"nvml",
  "metrics_source":"nvml-gpm","scope":"process","interval_secs":2.0}
 {"timestamp_ms":...,"scope":"process","gpus":[{GpuSample}],"cpu_pct":412.0,
  "process_count":9,"steps":[{StepEvent}],"hook_peers":[...]}

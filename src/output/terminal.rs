@@ -166,7 +166,7 @@ fn render_header(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
         (m, _) => m.to_string(),
     };
     let text = format!(
-        "{}  •  {}{}  •  {}  •  source: {}   [q] quit",
+        "{}  •  {}{}  •  {}  •  GPU counters: {}   [q] quit",
         snap.gpu_name,
         target,
         cost,
@@ -229,7 +229,7 @@ fn render_mfu(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
             } else if pct >= snap.target_mfu_pct * 0.55 {
                 Color::Yellow
             } else {
-                Color::Red
+                Color::LightRed
             };
             let bound = if m.upper_bound { "≤ " } else { "" };
             let approx = if m.confidence == Confidence::Low {
@@ -279,6 +279,9 @@ fn render_mfu(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
             s.tokens_per_sec
                 .map(|t| format!("  •  {t:.0} tok/s"))
                 .unwrap_or_default()
+                + &s.samples_per_sec
+                    .map(|v| format!("  •  {v:.1} samples/s"))
+                    .unwrap_or_default()
         ));
     }
     if m.source == MfuSource::KernelBusy {
@@ -300,11 +303,11 @@ fn render_breakdown(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
             )],
         ),
         BreakdownSource::Instrumented => (
-            " Time Breakdown — measured by the Python hook ".to_string(),
+            " Time Breakdown — measured by the training hook ".to_string(),
             vec![
                 bar("Forward/backward ", b.compute_pct, Color::Green),
                 bar("Waiting for data ", b.data_wait_pct, Color::Yellow),
-                bar("Optimizer step   ", b.optimizer_pct, Color::Blue),
+                bar("Optimizer step   ", b.optimizer_pct, Color::LightBlue),
                 bar("Other            ", b.other_pct, Color::DarkGray),
             ],
         ),
@@ -340,24 +343,32 @@ fn bar(label: &str, pct: f32, color: Color) -> Line<'static> {
 }
 
 fn render_hardware(f: &mut Frame, area: Rect, snap: &SessionSnapshot) {
-    let throttled = snap.gpus.iter().any(|g| g.throttle.any());
+    let throttled = snap
+        .gpus
+        .iter()
+        .any(|g| g.throttle.is_some_and(|t| t.any()));
     let first = snap.gpus.first();
     let line1 = match first {
         Some(g) => {
-            let mut reasons = vec![];
-            if g.throttle.thermal() {
-                reasons.push("THERMAL");
-            }
-            if g.throttle.power_cap {
-                reasons.push("POWER CAP");
-            }
-            if g.throttle.hw_slowdown {
-                reasons.push("HW SLOWDOWN");
-            }
-            let throttle = if reasons.is_empty() {
-                "none".to_string()
-            } else {
-                reasons.join(", ")
+            let throttle = match g.throttle {
+                None => "N/A".to_string(),
+                Some(t) => {
+                    let mut reasons = vec![];
+                    if t.thermal() {
+                        reasons.push("THERMAL");
+                    }
+                    if t.power_cap {
+                        reasons.push("POWER CAP");
+                    }
+                    if t.hw_slowdown {
+                        reasons.push("HW SLOWDOWN");
+                    }
+                    if reasons.is_empty() {
+                        "none".to_string()
+                    } else {
+                        reasons.join(", ")
+                    }
+                }
             };
             format!(
                 "  Temp {}  •  Power {} / {}  •  Clock {}  •  Throttle: {}",
@@ -492,9 +503,32 @@ mod tests {
         let snap = crate::export::tests::sample_snapshot();
         let text = render_to_text(&snap, 140, 45);
         assert!(text.contains("MFU upper bound (GPU busy time)"), "{text}");
-        assert!(text.contains("source: nvml"));
+        assert!(text.contains("GPU counters: nvml"));
         assert!(text.contains("[q] quit"));
         assert!(text.contains("inferred from sampling"));
+    }
+
+    #[test]
+    fn unknown_throttle_is_na_and_text_stays_readable() {
+        let mut snap = crate::export::tests::sample_snapshot();
+        snap.gpus[0].throttle = None;
+        let text = render_to_text(&snap, 140, 45);
+        assert!(text.contains("Throttle: N/A"), "{text}");
+        assert!(!text.contains("Throttle: none"));
+
+        snap.breakdown.source = BreakdownSource::Instrumented;
+        snap.breakdown.optimizer_pct = 10.0;
+        let backend = ratatui::backend::TestBackend::new(140, 45);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render_frame(f, &snap)).unwrap();
+        let buf = term.backend().buffer().clone();
+        assert!(
+            !buf.content().iter().any(|c| c.fg == Color::Blue),
+            "dark blue is unreadable on dark terminals"
+        );
+        let text = render_to_text(&snap, 140, 45);
+        assert!(text.contains("measured by the training hook"));
+        assert!(!text.contains("Python hook"));
     }
 
     #[test]

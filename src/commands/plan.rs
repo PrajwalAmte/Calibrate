@@ -99,7 +99,21 @@ pub fn build_report(
     price_source: String,
     specs: &SpecDb,
 ) -> PlanReport {
-    let single = vram::estimate(spec, setup, 1);
+    // The headline figure assumes NVIDIA unless every listing is an Apple GPU.
+    let apple_only = !listings.is_empty()
+        && listings
+            .iter()
+            .all(|l| vram::GpuRuntime::for_gpu(&l.gpu_model) == vram::GpuRuntime::AppleMetal);
+    let single = vram::estimate_for(
+        spec,
+        setup,
+        1,
+        if apple_only {
+            vram::GpuRuntime::AppleMetal
+        } else {
+            vram::GpuRuntime::Cuda
+        },
+    );
     let utilization = p.utilization.unwrap_or(dur::DEFAULT_UTILIZATION);
     let total_tokens = p
         .dataset_rows
@@ -135,7 +149,13 @@ pub fn build_report(
         if p.availability == Availability::Now && !launchable {
             continue;
         }
-        let need = vram::estimate(spec, setup, l.gpu_count).total_gib;
+        let need = vram::estimate_for(
+            spec,
+            setup,
+            l.gpu_count,
+            vram::GpuRuntime::for_gpu(&l.gpu_model),
+        )
+        .total_gib;
         if l.vram_per_gpu_gib + 0.5 < need {
             too_small += 1;
             continue;

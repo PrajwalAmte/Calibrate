@@ -25,7 +25,7 @@ pub struct VramBreakdown {
     pub activations_gib: f64,
     /// Logits and the fp32 copy used by the cross-entropy loss.
     pub logits_gib: f64,
-    /// CUDA context, cuBLAS workspace and allocator fragmentation.
+    /// Runtime context (CUDA on NVIDIA) and allocator fragmentation.
     pub overhead_gib: f64,
     pub total_gib: f64,
     /// Assumptions behind the numbers, shown to the user.

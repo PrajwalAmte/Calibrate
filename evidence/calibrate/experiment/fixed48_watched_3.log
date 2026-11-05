@@ -1,0 +1,10 @@
+pid=8006 params=22565763 pairs=19332 same=17357 different=1975
+step   20/150  loss 0.6759  0.99 steps/s
+step   40/150  loss 0.6213  1.09 steps/s
+step   60/150  loss 0.5313  1.14 steps/s
+step   80/150  loss 0.5032  1.18 steps/s
+step  100/150  loss 0.4882  1.20 steps/s
+step  120/150  loss 0.4589  1.24 steps/s
+step  140/150  loss 0.4223  1.30 steps/s
+Training took 112 s.
+Scores for the checked pairs are in ../data/neural_scores_tmp.csv.

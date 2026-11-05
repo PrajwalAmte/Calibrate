@@ -1,0 +1,24 @@
+calibrate diagnose — system capability check
+
+[ Platform ]
+  ·  OS: macos  arch: aarch64  •  calibrate 0.2.0
+  ✓  macOS — Apple GPU support via IOKit (system-wide figures)
+
+[ Apple GPU ]
+  ·  Chip: Apple M1 GPU
+  ✓  macOS 26.5.1 — IOKit GPU statistics supported
+  ✓  IOKit GPU service found (AGXAccelerator / IOAccelerator)
+  ·  GPU temperature/power are not available without root (powermetrics); shown as N/A
+
+[ Process visibility ]
+  ✓  Can observe own PID (5621) — process visibility OK
+  ✓  Process CPU accounting readable
+  ·  No active training processes detected (python/torch/launchers)
+
+[ Configuration & network ]
+  ·  No config file (optional): /Users/prajwalamte/Library/Application Support/calibrate/config.toml
+  ✓  Hook socket directory writable: /tmp
+  ·  Credentials: HF_TOKEN not set, LAMBDA_API_KEY not set, RUNPOD_API_KEY not set
+  ✓  GPU spec database reachable (https://raw.githubusercontent.com/PrajwalAmte/Calibrate/main/assets/fallback_specs.json)
+
+Result: OK — all checks passed. calibrate is ready to use.

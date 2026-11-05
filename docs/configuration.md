@@ -79,6 +79,24 @@ For on-prem clusters, reserved capacity or negotiated rates:
 instance. `{"listings": [...]}` is also accepted. GPU names are matched
 against the spec database (aliases and NVML spellings work).
 
+## Planning for a local machine
+
+`plan` prices cloud listings by default. For a workstation or a Mac, describe
+it in a prices file at no cost and plan against it:
+
+```json
+[{"provider": "local", "gpu_model": "M1", "vram_per_gpu_gib": 5.3, "hourly_usd": 0}]
+```
+
+```bash
+calibrate plan -m ./my-model --params-b 0.0226 --dataset-rows 19332 --seq-len 64 \
+  --prices-file local.json --offline
+```
+
+Use the GPU memory budget, not total RAM: on Apple Silicon it is Metal's
+recommended working set (shown by `calibrate watch`). Apple GPUs are estimated
+without the CUDA context overhead.
+
 ## Caches
 
 Under the platform cache directory (`~/.cache/calibrate` on Linux):

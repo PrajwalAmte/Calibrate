@@ -34,7 +34,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: calibrate
-          image: ghcr.io/prajwalamte/calibrate:0.2.0
+          image: ghcr.io/prajwalamte/calibrate:0.2.1
           args:
             - watch
             - --gpus=all

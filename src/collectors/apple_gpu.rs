@@ -2,7 +2,7 @@ use std::os::raw::{c_char, c_int, c_void};
 
 use tracing::warn;
 
-use crate::collectors::{GpuSample, Throttle};
+use crate::collectors::GpuSample;
 use crate::error::CalibrateError;
 
 // IOKit / CoreFoundation type aliases
@@ -267,7 +267,7 @@ impl AppleBackend {
                 temperature_c: None,
                 power_w: None,
                 power_limit_w: None,
-                throttle: Throttle::default(),
+                throttle: None,
             })
             .collect()
     }
@@ -313,6 +313,7 @@ mod tests {
             "a missing counter must stay missing"
         );
         assert_eq!(s[0].temperature_c, None);
+        assert_eq!(s[0].throttle, None, "macOS cannot see throttling");
         assert_eq!(s[0].power_w, None);
         assert!(s[0].vram_total_mib.unwrap_or(0) > 0);
     }

@@ -10,7 +10,8 @@
 //!   plus one layer's recompute working set, `b·s·(16h + 6f)` bytes with
 //!   FlashAttention/SDPA (no materialised attention scores).
 //! * logits: `b·s·V` in bf16 plus the fp32 copy used by cross-entropy.
-//! * overhead: CUDA context + workspaces (~0.75 GiB) and 5 % fragmentation.
+//! * overhead: CUDA context + workspaces (~0.75 GiB, NVIDIA only) and 5 %
+//!   allocator fragmentation.
 
 use anyhow::{bail, Result};
 
@@ -56,7 +57,39 @@ pub fn lora_params(spec: &ModelSpec) -> f64 {
     LORA_RANK * per_layer * spec.num_layers as f64
 }
 
+/// Which GPU software stack the overhead estimate applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuRuntime {
+    Cuda,
+    /// Unified-memory Apple GPUs: no CUDA context to allocate.
+    AppleMetal,
+}
+
+impl GpuRuntime {
+    /// Apple names normalise to a leading `m<digit>` token ("M3 Max").
+    pub fn for_gpu(name: &str) -> Self {
+        let n = crate::gpu_specs::normalize_for_match(name);
+        let first = n.split_whitespace().next().unwrap_or("");
+        let mut c = first.chars();
+        if c.next() == Some('m') && first.len() >= 2 && c.all(|d| d.is_ascii_digit()) {
+            Self::AppleMetal
+        } else {
+            Self::Cuda
+        }
+    }
+}
+
+#[cfg(test)]
 pub fn estimate(spec: &ModelSpec, setup: &TrainingSetup, gpu_count: u32) -> VramBreakdown {
+    estimate_for(spec, setup, gpu_count, GpuRuntime::Cuda)
+}
+
+pub fn estimate_for(
+    spec: &ModelSpec,
+    setup: &TrainingSetup,
+    gpu_count: u32,
+    runtime: GpuRuntime,
+) -> VramBreakdown {
     let n = gpu_count.max(1) as f64;
     let params = spec.param_count_b * 1e9;
     let emb = spec.embedding_params().min(params);
@@ -120,7 +153,11 @@ pub fn estimate(spec: &ModelSpec, setup: &TrainingSetup, gpu_count: u32) -> Vram
     }
 
     let subtotal = w + g + o + act_bytes + logit_bytes;
-    let overhead = CUDA_CONTEXT_GIB * GIB + subtotal * FRAGMENTATION;
+    let context_gib = match runtime {
+        GpuRuntime::Cuda => CUDA_CONTEXT_GIB,
+        GpuRuntime::AppleMetal => 0.0,
+    };
+    let overhead = context_gib * GIB + subtotal * FRAGMENTATION;
     VramBreakdown {
         gpu_count: gpu_count.max(1),
         weights_gib: w / GIB,
@@ -270,6 +307,21 @@ mod tests {
         );
         assert!(un.total_gib < base.total_gib);
         assert_eq!(un.weights_gib, base.weights_gib);
+    }
+
+    #[test]
+    fn cuda_overhead_applies_only_to_nvidia() {
+        assert_eq!(GpuRuntime::for_gpu("M1"), GpuRuntime::AppleMetal);
+        assert_eq!(
+            GpuRuntime::for_gpu("Apple M3 Max GPU"),
+            GpuRuntime::AppleMetal
+        );
+        assert_eq!(GpuRuntime::for_gpu("H100 SXM"), GpuRuntime::Cuda);
+        assert_eq!(GpuRuntime::for_gpu("MI300X"), GpuRuntime::Cuda);
+        let s = setup(FinetuneMethod::Lora, OptimizerLib::None, QuantLevel::None);
+        let nvidia = estimate_for(&llama8b(), &s, 1, GpuRuntime::Cuda);
+        let apple = estimate_for(&llama8b(), &s, 1, GpuRuntime::AppleMetal);
+        assert!((nvidia.overhead_gib - apple.overhead_gib - 0.75).abs() < 1e-9);
     }
 
     #[test]

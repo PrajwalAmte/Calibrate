@@ -53,7 +53,8 @@ pub struct GpuStatus {
     pub temperature_c: Option<f32>,
     pub power_w: Option<f32>,
     pub power_limit_w: Option<f32>,
-    pub throttle: Throttle,
+    /// `null` when the platform does not report throttle reasons.
+    pub throttle: Option<Throttle>,
     /// Sustained VRAM growth on this device — possible leak.
     pub vram_growing: bool,
 }

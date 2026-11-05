@@ -1,6 +1,33 @@
 use crate::metrics::units::{fmt_hms, fmt_mib, fmt_opt, fmt_pct, fmt_temp, fmt_usd};
 use crate::session::state::SessionSnapshot;
 
+fn terminal_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(100)
+}
+
+/// Wrap `text` on word boundaries; continuation lines are indented by `indent`.
+pub fn wrap_words(text: &str, width: usize, indent: usize) -> String {
+    let room = width.saturating_sub(indent).max(20);
+    let mut out = String::new();
+    let mut col = 0;
+    for word in text.split_whitespace() {
+        let len = word.chars().count();
+        if col > 0 && col + 1 + len > room {
+            out.push('\n');
+            out.push_str(&" ".repeat(indent));
+            col = 0;
+        } else if col > 0 {
+            out.push(' ');
+            col += 1;
+        }
+        out.push_str(word);
+        col += len;
+    }
+    out
+}
+
 /// End-of-session summary printed after the TUI exits.
 pub struct SummaryReport;
 
@@ -15,7 +42,7 @@ impl SummaryReport {
         line("calibrate watch — session summary".into());
         line(format!("  GPU              : {}", s.gpu_name));
         line(format!(
-            "  Duration         : {}   ({} samples, source: {})",
+            "  Duration         : {}   ({} samples, GPU counters: {})",
             fmt_hms(s.elapsed_secs),
             s.ticks_observed,
             s.metrics_source
@@ -73,7 +100,10 @@ impl SummaryReport {
             line(format!("  ⚠  {w}"));
         }
         line(format!("  Primary finding  : {}", s.recommendation.title));
-        line(format!("  Recommendation   : {}", s.recommendation.action));
+        line(format!(
+            "  Recommendation   : {}",
+            wrap_words(&s.recommendation.action, terminal_width(), 21)
+        ));
         if let Some(c) = &s.cost {
             let lb = if c.is_lower_bound { "≥ " } else { "" };
             line(format!(
@@ -89,5 +119,21 @@ impl SummaryReport {
 
     pub fn print(s: &SessionSnapshot) {
         print!("{}", Self::render(s));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wraps_on_words_with_indent() {
+        let w = wrap_words("periodic evaluation inside the loop", 30, 21);
+        assert_eq!(w.lines().next().unwrap().trim_end(), "periodic evaluation");
+        assert!(w.contains("\n                     inside"), "{w}");
+        for l in w.lines() {
+            assert!(!l.trim().is_empty());
+        }
+        assert_eq!(wrap_words("one two", 100, 21), "one two");
     }
 }

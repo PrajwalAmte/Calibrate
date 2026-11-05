@@ -9,9 +9,10 @@ use hdrhistogram::Histogram;
 use tracing::{info, warn};
 
 use crate::analysis::bottleneck::{BottleneckDetector, DetectInput};
-use crate::analysis::recommendations::{Accelerator, RecommendationEngine};
+use crate::analysis::recommendations::{Accelerator, RecContext, RecommendationEngine};
 use crate::collectors::{GpuScope, Tick};
 use crate::gpu_specs::{ResolvedSpec, SpecDb};
+use crate::metrics::mfu::{MfuEstimate, MfuSource};
 use crate::metrics::window::{TickWindow, MIN_RELIABLE_SAMPLES};
 use crate::metrics::{breakdown, mfu, steps};
 use crate::session::state::{
@@ -69,6 +70,8 @@ pub struct Analyzer {
     last_ts: Option<u64>,
     ticks: u64,
     hist: Histogram<u64>,
+    /// Best MFU source seen; percentiles and peak only ever describe this one.
+    hist_source: MfuSource,
     peak_mfu: Option<f32>,
     peak_vram: BTreeMap<u32, u64>,
     vram_hist: BTreeMap<u32, VecDeque<u64>>,
@@ -88,6 +91,7 @@ impl Analyzer {
             last_ts: None,
             ticks: 0,
             hist: Histogram::new_with_max(1000, 3).expect("valid histogram bounds"),
+            hist_source: MfuSource::Unavailable,
             peak_mfu: None,
             peak_vram: BTreeMap::new(),
             vram_hist: BTreeMap::new(),
@@ -130,12 +134,7 @@ impl Analyzer {
 
         let elapsed = self.elapsed_secs();
         let est = mfu::compute(&self.window, &self.specs);
-        if let Some(m) = est.mfu_pct {
-            let _ = self
-                .hist
-                .record((m * 10.0).round().clamp(0.0, 1000.0) as u64);
-            self.peak_mfu = Some(self.peak_mfu.map_or(m, |p| p.max(m)));
-        }
+        self.record_mfu(&est);
         let bd = breakdown::infer(&self.window);
         let step_stats = steps::compute(&self.window);
 
@@ -158,9 +157,18 @@ impl Analyzer {
             breakdown: &bd,
             has_gpu_backend: self.cfg.has_gpu_backend(),
             gpus_in_use: latest.gpus.len(),
-            thermal_throttle: latest.gpus.iter().any(|g| g.throttle.thermal()),
-            power_cap: latest.gpus.iter().any(|g| g.throttle.power_cap),
-            hw_slowdown: latest.gpus.iter().any(|g| g.throttle.hw_slowdown),
+            thermal_throttle: latest
+                .gpus
+                .iter()
+                .any(|g| g.throttle.is_some_and(|t| t.thermal())),
+            power_cap: latest
+                .gpus
+                .iter()
+                .any(|g| g.throttle.is_some_and(|t| t.power_cap)),
+            hw_slowdown: latest
+                .gpus
+                .iter()
+                .any(|g| g.throttle.is_some_and(|t| t.hw_slowdown)),
             clock_pct_of_boost: clock_pct,
             busy_pct,
             steps_erratic: step_stats.as_ref().is_some_and(|s| s.erratic),
@@ -171,11 +179,18 @@ impl Analyzer {
         let bottleneck = BottleneckDetector::detect(&detect);
         let recommendation = RecommendationEngine::recommend(
             bottleneck,
-            self.cfg.accelerator(),
-            est.mfu_pct,
-            bd.data_wait_pct,
-            self.cfg.target_mfu,
-            !latest.hook_peers.is_empty(),
+            &RecContext {
+                accel: self.cfg.accelerator(),
+                framework: latest
+                    .hook_peers
+                    .iter()
+                    .find_map(|p| p.framework.as_deref()),
+                mfu_pct: est.mfu_pct,
+                data_wait_pct: bd.data_wait_pct,
+                target_mfu: self.cfg.target_mfu,
+                hook_active: !latest.hook_peers.is_empty(),
+                steps: step_stats.as_ref(),
+            },
         );
 
         let cost = self.cfg.cost_per_hour.map(|cph| {
@@ -250,6 +265,25 @@ impl Analyzer {
             ticks_observed: self.ticks,
             warnings,
         }
+    }
+
+    /// Add to the session's percentiles and peak. A better source (the hook's
+    /// first steps arriving) restarts them, and a worse one is not recorded,
+    /// so a busy-time upper bound can never pollute measured MFU statistics.
+    fn record_mfu(&mut self, est: &MfuEstimate) {
+        let Some(m) = est.mfu_pct else { return };
+        if est.source.rank() < self.hist_source.rank() {
+            return;
+        }
+        if est.source.rank() > self.hist_source.rank() {
+            self.hist.reset();
+            self.peak_mfu = None;
+            self.hist_source = est.source;
+        }
+        let _ = self
+            .hist
+            .record((m * 10.0).round().clamp(0.0, 1000.0) as u64);
+        self.peak_mfu = Some(self.peak_mfu.map_or(m, |p| p.max(m)));
     }
 
     fn elapsed_secs(&self) -> f64 {
@@ -438,7 +472,7 @@ mod tests {
     use super::*;
     use crate::analysis::bottleneck::Bottleneck;
     use crate::collectors::testing::{gpu, tick};
-    use crate::metrics::mfu::MfuSource;
+    use crate::collectors::StepEvent;
     use crate::session::state::new_snapshot_channel;
 
     fn cfg(cost: Option<f64>) -> SessionConfig {
@@ -544,6 +578,38 @@ mod tests {
         assert!(!is_leaking(&dip, total));
         let short: VecDeque<u64> = (0..10).map(|i| 10_000 + i * 500).collect();
         assert!(!is_leaking(&short, total));
+    }
+
+    #[test]
+    fn busy_time_does_not_pollute_measured_percentiles_or_peak() {
+        // Regression (real run): 14 s of busy time before the hook's first
+        // steps gave "peak 54.1 %, p95 29 %" for a job measuring 7.8 %.
+        let mut a = Analyzer::new(cfg(None), SpecDb::builtin());
+        let mut last = None;
+        for i in 0..60u64 {
+            let mut t = tick(i * 1000, vec![named(0, 90.0)], Some(100.0));
+            if i >= 14 {
+                t.steps.push(StepEvent {
+                    pid: 1,
+                    rank: None,
+                    step: i,
+                    t_end_ms: i * 1000,
+                    step_s: 1.0,
+                    data_s: None,
+                    compute_s: None,
+                    optimizer_s: None,
+                    tokens: None,
+                    samples: None,
+                    flops: Some(0.10 * 165.2e12),
+                });
+            }
+            last = Some(a.ingest(t));
+        }
+        let s = last.unwrap();
+        assert_eq!(s.mfu.source, MfuSource::Instrumented);
+        assert!((s.mfu.mfu_pct.unwrap() - 10.0).abs() < 0.1);
+        assert!(s.peak_mfu_pct.unwrap() < 11.0, "{:?}", s.peak_mfu_pct);
+        assert!(s.mfu_percentiles.unwrap().p95 < 11.0);
     }
 
     #[test]
