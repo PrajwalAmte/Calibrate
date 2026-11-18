@@ -12,7 +12,7 @@ pub fn render(report: &BenchReport) -> String {
     out.push_str(&format!("**Optimising for:** {}  \n", report.optimize_for));
     out.push_str(&format!(
         "**Ran at:** {}  \n",
-        report.ran_at.format("%Y-%m-%d %H:%M UTC")
+        report.ran_at.strftime("%Y-%m-%d %H:%M UTC")
     ));
     out.push('\n');
 

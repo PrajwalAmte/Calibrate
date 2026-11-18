@@ -179,7 +179,7 @@ pub fn render_to_string(report: &PlanReport, budget: Option<f64>) -> String {
     ln(format!(
         "    · prices: {} (fetched {})",
         report.price_source,
-        report.generated_at.format("%Y-%m-%d %H:%M UTC")
+        report.generated_at.strftime("%Y-%m-%d %H:%M UTC")
     ));
     if !report.skipped_providers.is_empty() {
         ln(String::new());

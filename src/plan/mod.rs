@@ -3,7 +3,6 @@ pub mod model;
 pub mod providers;
 pub mod vram;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{FinetuneMethod, OptimizerLib, QuantLevel};
@@ -193,7 +192,7 @@ pub struct PlanReport {
     pub skipped_providers: Vec<SkippedProvider>,
     /// Where prices came from: "live", "cache", "file".
     pub price_source: String,
-    pub generated_at: DateTime<Utc>,
+    pub generated_at: jiff::Timestamp,
 }
 
 #[cfg(test)]

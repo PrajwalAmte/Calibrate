@@ -10,6 +10,11 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+    groups:
+      # One PR per week for all Actions, not one per action. CI exercises most
+      # of them; release.yml only runs on tags, so read the notes for major bumps.
+      actions:
+        patterns: ["*"]
   - package-ecosystem: pip
     directory: /python
     schedule: { interval: monthly }

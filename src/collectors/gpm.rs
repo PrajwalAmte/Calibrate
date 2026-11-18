@@ -96,7 +96,7 @@ impl Gpm {
         // same ones nvml-wrapper already ran.
         let lib = names
             .iter()
-            .find_map(|n| unsafe { libloading::Library::new(n).ok() })?;
+            .find_map(|n| unsafe { libloading::Library::new(*n).ok() })?;
         // SAFETY: the signatures match nvml.h for these symbols.
         unsafe {
             let query_support = *lib

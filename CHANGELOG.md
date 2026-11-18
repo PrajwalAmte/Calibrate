@@ -37,6 +37,22 @@ Found by running calibrate on a real fine-tuning job (`evidence/calibrate/`).
 - Docs: count non-padding tokens for meaningful MFU; plan for a local machine
   with a `--prices-file`.
 
+### Changed
+- `chrono` (flagged unmaintained by RustSec, with no fix) was replaced by `jiff`
+  for report timestamps. JSON stays RFC 3339 (`...Z`), and baselines saved by
+  `bench --save` in older versions still load.
+- Removed the direct `parking_lot` and `crossterm` dependencies (the standard
+  library mutex is used; the terminal comes through `ratatui::crossterm`, so its
+  version always matches ratatui's). `parking_lot` 0.13 needs Rust 1.95, above
+  our 1.88 minimum.
+- Dependencies updated for RustSec advisories (`tokio`, `hyper`, `rustls`,
+  `h2`, `anyhow`, `rand`, ...), `libloading` 0.8 → 0.9, and all other compatible
+  updates. Cargo now prefers versions that fit the supported Rust version.
+- GitHub Actions updated: download-artifact 8, setup-qemu 4, metadata-action 6,
+  setup-python 7, rust-cache 2.9. Dependabot now groups Actions into one PR.
+- Security advisories are checked daily and on dependency changes
+  (`advisories.yml`) instead of blocking every pull request.
+
 ### Schema notes
 - `gpus[].throttle` may now be `null` (it was always an object). This brings it
   in line with the documented "unavailable is null" rule; `schema_version` stays 1.

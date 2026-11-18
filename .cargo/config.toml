@@ -1,0 +1,5 @@
+# When updating dependencies, prefer versions whose declared Rust version fits
+# `rust-version` in Cargo.toml (1.88) instead of the newest release, which may
+# require a newer compiler than we support.
+[resolver]
+incompatible-rust-versions = "fallback"

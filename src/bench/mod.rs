@@ -6,7 +6,6 @@ pub mod runtime;
 pub mod runtimes;
 pub mod stats;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub use stats::BenchStats;
@@ -64,5 +63,53 @@ pub struct BenchReport {
     pub results: Vec<BenchResult>,
     pub skipped: Vec<SkippedRuntime>,
     pub recommendation: Option<Recommendation>,
-    pub ran_at: DateTime<Utc>,
+    pub ran_at: jiff::Timestamp,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report_json(ran_at: &str) -> String {
+        format!(
+            r#"{{"model_path":"m","optimize_for":"latency","results":[],"skipped":[],
+               "recommendation":null,"ran_at":"{ran_at}"}}"#
+        )
+    }
+
+    #[test]
+    fn baselines_saved_by_older_versions_still_load() {
+        // `bench --save` files written while timestamps used chrono, in the
+        // forms chrono emitted (Z suffix, microseconds or whole seconds).
+        for ts in [
+            "2026-10-21T04:42:36.182661Z",
+            "2026-10-21T04:42:36Z",
+            "2026-10-21T04:42:36.182661123Z",
+            "2026-10-21T04:42:36+00:00",
+        ] {
+            let r: BenchReport =
+                serde_json::from_str(&report_json(ts)).unwrap_or_else(|e| panic!("{ts}: {e}"));
+            assert_eq!(
+                r.ran_at.strftime("%Y-%m-%d %H:%M").to_string(),
+                "2026-10-21 04:42"
+            );
+        }
+    }
+
+    #[test]
+    fn timestamps_serialize_as_rfc3339_utc() {
+        let r: BenchReport = serde_json::from_str(&report_json("2026-10-21T04:42:36.5Z")).unwrap();
+        let v = serde_json::to_value(&r).unwrap();
+        let s = v["ran_at"].as_str().unwrap();
+        assert!(
+            s.starts_with("2026-10-21T04:42:36.5") && s.ends_with('Z'),
+            "{s}"
+        );
+        let now = serde_json::to_value(jiff::Timestamp::now()).unwrap();
+        let now = now.as_str().unwrap();
+        assert!(
+            now.ends_with('Z') && now.contains('T') && now.len() >= 20,
+            "{now}"
+        );
+    }
 }

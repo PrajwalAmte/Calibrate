@@ -9,12 +9,12 @@ pub fn print_comparison(baseline: &BenchReport, current: &BenchReport) {
     println!(
         "  Baseline : {} ({})",
         baseline.model_path,
-        baseline.ran_at.format("%Y-%m-%d")
+        baseline.ran_at.strftime("%Y-%m-%d")
     );
     println!(
         "  Current  : {} ({})",
         current.model_path,
-        current.ran_at.format("%Y-%m-%d")
+        current.ran_at.strftime("%Y-%m-%d")
     );
     println!();
 
@@ -116,7 +116,6 @@ pub fn format_latency_delta(base: &BenchResult, current: &BenchResult) -> String
 mod tests {
     use super::*;
     use crate::bench::{BenchResult, BenchStats};
-    use chrono::Utc;
 
     fn make_result(runtime: &str, p99_ms: f64) -> BenchResult {
         BenchResult {
@@ -151,7 +150,7 @@ mod tests {
             results,
             skipped: vec![],
             recommendation: None,
-            ran_at: Utc::now(),
+            ran_at: jiff::Timestamp::now(),
         }
     }
 

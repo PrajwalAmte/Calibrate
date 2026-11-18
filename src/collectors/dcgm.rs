@@ -9,10 +9,8 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-use parking_lot::Mutex;
 
 use crate::collectors::{ProfMetrics, ProfSource};
 
@@ -71,7 +69,10 @@ impl DcgmReader {
                 for line in BufReader::new(stdout).lines() {
                     let Ok(line) = line else { break };
                     if let Some((gpu, m)) = parse_dmon_line(&line) {
-                        sink.lock().insert(gpu, (Instant::now(), m));
+                        // A poisoned lock still holds valid data: keep reading it.
+                        sink.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(gpu, (Instant::now(), m));
                     }
                 }
             })?;
@@ -84,7 +85,7 @@ impl DcgmReader {
 
     /// Latest metrics for a GPU, if fresh.
     pub fn get(&self, gpu: u32) -> Option<ProfMetrics> {
-        let map = self.latest.lock();
+        let map = self.latest.lock().unwrap_or_else(|e| e.into_inner());
         let (at, m) = map.get(&gpu)?;
         (at.elapsed() <= self.max_age).then_some(*m)
     }

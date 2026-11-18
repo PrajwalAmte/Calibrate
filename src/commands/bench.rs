@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use chrono::Utc;
 use tracing::info;
 
 use crate::bench::harness::{run_runtime_benchmarks, HarnessConfig};
@@ -107,7 +106,7 @@ pub async fn run(args: BenchArgs) -> Result<()> {
         results: all_results,
         skipped: all_skipped,
         recommendation,
-        ran_at: Utc::now(),
+        ran_at: jiff::Timestamp::now(),
     };
 
     // Optionally persist the report.

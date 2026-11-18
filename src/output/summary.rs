@@ -2,7 +2,7 @@ use crate::metrics::units::{fmt_hms, fmt_mib, fmt_opt, fmt_pct, fmt_temp, fmt_us
 use crate::session::state::SessionSnapshot;
 
 fn terminal_width() -> usize {
-    crossterm::terminal::size()
+    ratatui::crossterm::terminal::size()
         .map(|(w, _)| w as usize)
         .unwrap_or(100)
 }

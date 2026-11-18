@@ -29,9 +29,10 @@ nvml-wrapper = "0.10"
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
-# Terminal UI
+# Terminal UI. crossterm comes through ratatui::crossterm so the two versions
+# can never drift apart (a separate crossterm dependency can differ from the
+# one ratatui renders with).
 ratatui = "0.29"
-crossterm = "0.28"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -52,7 +53,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 toml = "0.8"
 
 # Runtime loading of optional NVML GPM symbols (absent on older drivers)
-libloading = "0.8"
+libloading = "0.9"
 
 # MPSC channel bridging std::thread → tokio
 flume = "0.11"
@@ -60,9 +61,6 @@ flume = "0.11"
 # Structured diagnostics
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
-
-# Faster RwLock / Mutex
-parking_lot = "0.12"
 
 # High-dynamic-range histogram for step-time percentiles
 hdrhistogram = "7"
@@ -79,8 +77,9 @@ rand = { version = "0.8", features = ["small_rng"] }
 # Process-name matching for --process-name and --auto flags
 regex = { version = "1", default-features = false, features = ["std"] }
 
-# Timestamps in BenchReport (comparison over time)
-chrono = { version = "0.4", features = ["serde"] }
+# Timestamps in reports (RFC 3339 in JSON). jiff replaced chrono, which RustSec
+# flags as unmaintained. No time-zone database is needed: only UTC instants.
+jiff = { version = "1", default-features = false, features = ["std", "serde"] }
 
 # Temporary files for subprocess driver scripts (bench)
 tempfile = "3"

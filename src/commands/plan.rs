@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
 
 use crate::cli::{Availability, PlanArgs, PlanOutputFormat};
 use crate::gpu_specs::SpecDb;
@@ -234,7 +233,7 @@ pub fn build_report(
         recommendation,
         skipped_providers: skipped,
         price_source,
-        generated_at: Utc::now(),
+        generated_at: jiff::Timestamp::now(),
     }
 }
 
