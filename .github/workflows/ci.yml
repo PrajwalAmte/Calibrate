@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # master
@@ -42,7 +42,7 @@ jobs:
       fail-fast: false
       matrix:
         # x86-64 Linux, ARM64 Linux (Grace / Graviton class) and Apple Silicon.
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # master
@@ -72,8 +72,11 @@ jobs:
 
   python-hook:
     name: calibrate-hook (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: GitHub's Python 3.9 builds exist for Ubuntu
+    # 22.04 and 24.04 only (3.9 is end-of-life), and `latest` moved to 26.04.
+    runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false   # one Python version failing must not cancel the others
       matrix:
         python: ["3.9", "3.11", "3.13"]
     steps:
