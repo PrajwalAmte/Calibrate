@@ -56,7 +56,7 @@ toml = "0.8"
 libloading = "0.9"
 
 # MPSC channel bridging std::thread → tokio
-flume = "0.11"
+flume = "0.12"
 
 # Structured diagnostics
 tracing = "0.1"
