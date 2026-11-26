@@ -48,8 +48,13 @@ Found by running calibrate on a real fine-tuning job (`evidence/calibrate/`).
 - Dependencies updated for RustSec advisories (`tokio`, `hyper`, `rustls`,
   `h2`, `anyhow`, `rand`, ...), `libloading` 0.8 → 0.9, and all other compatible
   updates. Cargo now prefers versions that fit the supported Rust version.
-- GitHub Actions updated: download-artifact 8, setup-qemu 4, metadata-action 6,
-  setup-python 7, rust-cache 2.9. Dependabot now groups Actions into one PR.
+- GitHub Actions updated to current majors (Node 24 runtime): checkout 7,
+  upload-/download-artifact 7/8, attest-build-provenance 4 (storage records
+  disabled: they need an extra permission), action-gh-release 3,
+  build-push 7, login 4, setup-buildx 4, setup-qemu 4, metadata-action 6,
+  setup-python 7, rust-cache 2.9, cargo-deny-action 2.1.4. Dependabot now
+  groups Actions into one PR.
+- `url` 2.5.9 (RUSTSEC-2026-0592) and the other compatible dependency updates.
 - Security advisories are checked daily and on dependency changes
   (`advisories.yml`) instead of blocking every pull request.
 
